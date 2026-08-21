@@ -1,0 +1,20 @@
+LCD Backpack Pin			Raspberry Pi Pin Name	
+VCC							5V Power
+GND							Ground (GND)	
+SDA							GPIO 2 (I2C SDA)	
+SCL							GPIO 3 (I2C SCL)	
+
+Ultrasonic Pin				Raspberry Pi Pin Name	
+VCC							5V Power
+GND							Ground (GND)	
+TRIG							GPIO 24
+ECHO							GPIO 25
+
+LED Color & Slot			Raspberry Pi Pin Name
+Green LED — Slot 1		GPIO 5	
+Green LED — Slot 2		GPIO 6		
+Green LED — Slot 3		GPIO 13		
+Red LED — Slot 1			GPIO 12		
+Red LED — Slot 2			GPIO 16		
+Red LED — Slot 3			GPIO 20		
+LED Common Ground			GND		
