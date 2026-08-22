@@ -1,20 +1,54 @@
-LCD Backpack Pin			Raspberry Pi Pin Name	
-VCC							5V Power
-GND							Ground (GND)	
-SDA							GPIO 2 (I2C SDA)	
-SCL							GPIO 3 (I2C SCL)	
+1. 16x2 I2C LCD DISPLAY
+LCD Backpack Pin        Raspberry Pi Pin Name       Physical Header Pin
+VCC                     5V Power                    Pin 2 (or Pin 4)
+GND                     Ground (GND)                Pin 6
+SDA                     GPIO 2 (I2C SDA)            Pin 3
+SCL                     GPIO 3 (I2C SCL)            Pin 5
 
-Ultrasonic Pin				Raspberry Pi Pin Name	
-VCC							5V Power
-GND							Ground (GND)	
-TRIG							GPIO 24
-ECHO							GPIO 25
+2. LEDS (SLOT 1, 2, 3)
+LED Color & Slot        Raspberry Pi Pin Name       Physical Header Pin
+Green LED — Slot 1      GPIO 5                      Pin 29
+Green LED — Slot 2      GPIO 6                      Pin 31
+Green LED — Slot 3      GPIO 13                     Pin 33
+Red LED — Slot 1        GPIO 12                     Pin 32
+Red LED — Slot 2        GPIO 16                     Pin 36
+Red LED — Slot 3        GPIO 20                     Pin 38
+LED Common Ground       Ground (GND)                Pin 34 (or Pin 39)
 
-LED Color & Slot			Raspberry Pi Pin Name
-Green LED — Slot 1		GPIO 5	
-Green LED — Slot 2		GPIO 6		
-Green LED — Slot 3		GPIO 13		
-Red LED — Slot 1			GPIO 12		
-Red LED — Slot 2			GPIO 16		
-Red LED — Slot 3			GPIO 20		
-LED Common Ground			GND		
+3. BUZZER
+Buzzer Pin              Raspberry Pi Pin Name       Physical Header Pin
+Signal / VCC (+)        GPIO 18                     Pin 12
+Ground (-)              Ground (GND)                Pin 14
+
+4. BRUSHLESS FAN DC 5V
+Fan Connection          Raspberry Pi Pin Name       Physical Header Pin
+Fan Switch (Signal)     GPIO 14                     Pin 8
+Fan VCC (+ Red Wire)    5V Power                    Pin 2 (or Pin 4)
+Fan GND (- Black Wire)  Switched Ground             Transistor Collector / Drain
+Circuit Ground          Ground (GND)                Pin 6 (Shared Ground)
+
+5. SOLENOID LOCK RELAYS 
+Relay Channel           Connected Solenoid          Raspberry Pi Pin Name   Physical Header Pin
+Relay IN1               Slot 1 Solenoid Lock        GPIO 17                 Pin 11
+Relay IN2               Slot 2 Solenoid Lock        GPIO 27                 Pin 13
+Relay IN3               Slot 3 Solenoid Lock        GPIO 22                 Pin 15
+Relay IN4               Main Compartment Lock       GPIO 23                 Pin 16
+Relay VCC / GND         5V & GND                    5V Power & GND          Pin 4 & Pin 20
+
+6. IR KEY PRESENCE SENSORS (3 SLOTS)
+IR Sensor Output Pin    Monitored Slot              Raspberry Pi Pin Name   Physical Header Pin
+Slot 1 IR Sensor (DO)   Slot 1 Key Presence         GPIO 4                  Pin 7
+Slot 2 IR Sensor (DO)   Slot 2 Key Presence         GPIO 8                  Pin 24
+Slot 3 IR Sensor (DO)   Slot 3 Key Presence         GPIO 7                  Pin 26
+IR VCC / GND            5V (or 3.3V) & GND          Power & Ground          Pin 1 & Pin 9
+
+7. ULTRASONIC DISTANCE SENSOR (HC-SR04)
+Ultrasonic Pin          Raspberry Pi Pin Name       Physical Header Pin
+VCC                     5V Power                    Pin 4
+GND                     Ground (GND)                Pin 25
+TRIG                    GPIO 24                     Pin 18
+ECHO                    GPIO 25 (Voltage Divider)   Pin 22
+
+8. RASPBERRY PI CAMERA MODULE (QR SCANNER)
+Interface               Connection Port             Notes
+Ribbon Cable            CSI Camera Port             Insert into Pi Camera ribbon connector
