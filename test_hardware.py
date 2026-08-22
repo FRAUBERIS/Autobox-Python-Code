@@ -155,15 +155,13 @@ def test_leds():
 
 
 def test_buzzer():
-    print("\n[TEST 4/8] Testing Active Buzzer...")
-    lcd_print("Testing Buzzer", "Beep x2")
+    print("\n[TEST 4/8] Testing Active Buzzer (1 Beep)...")
+    lcd_print("Testing Buzzer", "Beep x1")
     try:
-        for i in range(2):
-            GPIO.output(BUZZER_PIN, GPIO.HIGH)
-            time.sleep(0.1)
-            GPIO.output(BUZZER_PIN, GPIO.LOW)
-            time.sleep(0.1)
-        print("  [ACTUATED] Pin toggled x2, confirm audibly that it beeped")
+        GPIO.output(BUZZER_PIN, GPIO.HIGH)
+        time.sleep(0.15)
+        GPIO.output(BUZZER_PIN, GPIO.LOW)
+        print("  [ACTUATED] Pin toggled x1, confirm audibly that it beeped")
         results["Active Buzzer"] = "ACTUATED (verify manually)"
         return True
     except Exception as e:
