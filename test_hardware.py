@@ -5,17 +5,17 @@ from picamera2 import Picamera2
 from pyzbar.pyzbar import decode
 from RPLCD.i2c import CharLCD
 
-API_BASE_URL = "http://192.168.11.130:8000"
+API_BASE_URL = "http://192.168.1.100:8000"
 API_KEYS = f"{API_BASE_URL}/api/keys"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 
 MAIN_LOCK_PIN = 23
-SLOT_PINS = {1: 17, 2: 27, 3: 22}
+SLOT_PINS = {1: 17}
 
-LED_GREEN_PINS = {1: 5, 2: 6, 3: 13}
-LED_RED_PINS = {1: 12, 2: 16, 3: 20}
+LED_GREEN_PINS = {1: 5}
+LED_RED_PINS = {1: 12}
 
-IR_SENSOR_PINS = {1: 4, 2: 8, 3: 7}
+IR_SENSOR_PINS = {1: 4}
 
 BUZZER_PIN = 18
 FAN_PIN = 14
@@ -49,7 +49,7 @@ def setup_gpio():
         GPIO.output(pin, GPIO.LOW)
 
     for slot, pin in IR_SENSOR_PINS.items():
-        GPIO.setup(pin, GPIO.IN)
+        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
     GPIO.setup(BUZZER_PIN, GPIO.OUT)
     GPIO.output(BUZZER_PIN, GPIO.LOW)
@@ -101,7 +101,7 @@ def test_lcd():
     try:
         lcd = CharLCD('PCF8574', LCD_I2C_ADDRESS, port=LCD_I2C_PORT, cols=16, rows=2)
         lcd.clear()
-        lcd_print("AUTOBOX FullTest", "LCD: OK")
+        lcd_print("AUTOBOX 1-Slot", "LCD: OK")
         print(f"  [PASS] LCD OK at {hex(LCD_I2C_ADDRESS)}")
         results["16x2 LCD Display"] = "PASS"
         time.sleep(1.5)
@@ -113,19 +113,19 @@ def test_lcd():
         return False
 
 def test_leds():
-    print("\n[TEST 3/9] Testing Status LEDs (Green & Red)...")
-    lcd_print("Testing LEDs...", "Slots 1, 2, 3")
+    print("\n[TEST 3/9] Testing Slot 1 Status LEDs (Green & Red)...")
+    lcd_print("Testing LEDs...", "Slot 1 Green/Red")
     try:
         for slot, pin in LED_GREEN_PINS.items():
             print(f"  Slot #{slot} GREEN (GPIO {pin}) ON")
             GPIO.output(pin, GPIO.HIGH)
-            time.sleep(0.3)
+            time.sleep(0.5)
             GPIO.output(pin, GPIO.LOW)
 
         for slot, pin in LED_RED_PINS.items():
             print(f"  Slot #{slot} RED (GPIO {pin}) ON")
             GPIO.output(pin, GPIO.HIGH)
-            time.sleep(0.3)
+            time.sleep(0.5)
             GPIO.output(pin, GPIO.LOW)
 
         for pin in list(LED_GREEN_PINS.values()) + list(LED_RED_PINS.values()):
@@ -134,7 +134,7 @@ def test_leds():
         for pin in list(LED_GREEN_PINS.values()) + list(LED_RED_PINS.values()):
             GPIO.output(pin, GPIO.LOW)
 
-        print("  [PASS] All 6 LEDs OK")
+        print("  [PASS] Slot 1 LEDs OK")
         results["Status LEDs"] = "PASS"
         return True
     except Exception as e:
@@ -177,7 +177,7 @@ def test_fan():
         return False
 
 def test_solenoids():
-    print("\n[TEST 6/9] Testing Solenoid Relays (Main Lock + Slots 1, 2, 3)...")
+    print("\n[TEST 6/9] Testing Solenoid Relays (Main Lock + Slot 1)...")
     lcd_print("Testing Locks", "Relays click...")
     try:
         print(f"  Main Door Lock (GPIO {MAIN_LOCK_PIN}) -> TRIGGER")
@@ -191,7 +191,7 @@ def test_solenoids():
             time.sleep(0.6)
             GPIO.output(pin, GPIO.LOW)
 
-        print("  [PASS] All 4 Solenoid relays triggered")
+        print("  [PASS] Main Door & Slot 1 Solenoid relays triggered")
         results["Solenoid Relays"] = "PASS"
         return True
     except Exception as e:
@@ -200,8 +200,8 @@ def test_solenoids():
         return False
 
 def test_ir_sensors():
-    print("\n[TEST 7/9] Testing IR Key Presence Sensors...")
-    lcd_print("Testing IR", "Read sensors...")
+    print("\n[TEST 7/9] Testing Slot 1 IR Key Presence Sensor...")
+    lcd_print("Testing IR", "Read Slot 1...")
     try:
         status_list = []
         for slot, pin in IR_SENSOR_PINS.items():
@@ -210,9 +210,9 @@ def test_ir_sensors():
             print(f"  Slot #{slot} IR Sensor (GPIO {pin}) -> Value: {val} ({state})")
             status_list.append(f"S{slot}:{state[:3]}")
 
-        lcd_print("IR Sensors", " ".join(status_list))
+        lcd_print("Slot 1 IR Sensor", " ".join(status_list))
         time.sleep(1.5)
-        print("  [PASS] All 3 IR sensor pins read successfully")
+        print("  [PASS] Slot 1 IR sensor pin read successfully")
         results["IR Sensors"] = "PASS"
         return True
     except Exception as e:
@@ -313,7 +313,7 @@ def test_camera():
 
 def main():
     print("=" * 55)
-    print("      AUTOBOX ALL-HARDWARE SELF-TEST")
+    print("      AUTOBOX 1-SLOT HARDWARE SELF-TEST")
     print("=" * 55)
 
     setup_gpio()
