@@ -1,11 +1,12 @@
 import time
+import numpy as np
 import requests
 import RPi.GPIO as GPIO
 from picamera2 import Picamera2
 from pyzbar.pyzbar import decode
 from RPLCD.i2c import CharLCD
 
-API_BASE_URL = "http://192.168.1.100:8000"
+API_BASE_URL = "http://192.168.11.130:8000"
 API_KEYS = f"{API_BASE_URL}/api/keys"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 
@@ -18,7 +19,6 @@ LED_RED_PINS = {1: 12}
 IR_SENSOR_PINS = {1: 4}
 
 BUZZER_PIN = 18
-FAN_PIN = 14
 
 ULTRASONIC_TRIG = 24
 ULTRASONIC_ECHO = 25
@@ -26,8 +26,14 @@ ULTRASONIC_ECHO = 25
 LCD_I2C_ADDRESS = 0x27
 LCD_I2C_PORT = 1
 
+HAVE_RELAY_FEEDBACK = False
+RELAY_FEEDBACK_PINS = {}
+
+CAMERA_BLACK_THRESHOLD = 8
+
 lcd = None
 results = {}
+
 
 def setup_gpio():
     GPIO.setmode(GPIO.BCM)
@@ -54,12 +60,14 @@ def setup_gpio():
     GPIO.setup(BUZZER_PIN, GPIO.OUT)
     GPIO.output(BUZZER_PIN, GPIO.LOW)
 
-    GPIO.setup(FAN_PIN, GPIO.OUT)
-    GPIO.output(FAN_PIN, GPIO.LOW)
-
     GPIO.setup(ULTRASONIC_TRIG, GPIO.OUT)
     GPIO.setup(ULTRASONIC_ECHO, GPIO.IN)
     GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
+
+    if HAVE_RELAY_FEEDBACK:
+        for name, pin in RELAY_FEEDBACK_PINS.items():
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
 
 def lcd_print(line1="", line2=""):
     if not lcd:
@@ -73,8 +81,9 @@ def lcd_print(line1="", line2=""):
     except Exception:
         pass
 
+
 def test_laravel():
-    print("\n[TEST 1/9] Testing Laravel API Connection...")
+    print("\n[TEST 1/8] Testing Laravel API Connection...")
     try:
         start = time.time()
         res = requests.get(API_KEYS, timeout=5)
@@ -83,7 +92,7 @@ def test_laravel():
             keys = res.json().get("keys", [])
             print(f"  [PASS] Connected ({ms}ms). Found {len(keys)} key slot(s).")
             for k in keys:
-                print(f"    Slot #{k.get('slot_number')}: {k.get('key_name')} [{k.get('status')}]")
+                print(f"    Slot {k.get('slot_number')}: {k.get('key_name')} [{k.get('status')}]")
             results["Laravel Connection"] = "PASS"
             return True
         else:
@@ -95,14 +104,15 @@ def test_laravel():
         results["Laravel Connection"] = "FAIL"
         return False
 
+
 def test_lcd():
     global lcd
-    print("\n[TEST 2/9] Testing 16x2 LCD Display...")
+    print("\n[TEST 2/8] Testing 16x2 LCD Display...")
     try:
         lcd = CharLCD('PCF8574', LCD_I2C_ADDRESS, port=LCD_I2C_PORT, cols=16, rows=2)
         lcd.clear()
         lcd_print("AUTOBOX 1-Slot", "LCD: OK")
-        print(f"  [PASS] LCD OK at {hex(LCD_I2C_ADDRESS)}")
+        print(f"  [PASS] LCD ACKed and accepted data at {hex(LCD_I2C_ADDRESS)}")
         results["16x2 LCD Display"] = "PASS"
         time.sleep(1.5)
         return True
@@ -112,18 +122,19 @@ def test_lcd():
         lcd = None
         return False
 
+
 def test_leds():
-    print("\n[TEST 3/9] Testing Slot 1 Status LEDs (Green & Red)...")
+    print("\n[TEST 3/8] Testing Slot 1 Status LEDs (Green & Red)...")
     lcd_print("Testing LEDs...", "Slot 1 Green/Red")
     try:
         for slot, pin in LED_GREEN_PINS.items():
-            print(f"  Slot #{slot} GREEN (GPIO {pin}) ON")
+            print(f"  Slot {slot} GREEN (GPIO {pin}) ON")
             GPIO.output(pin, GPIO.HIGH)
             time.sleep(0.5)
             GPIO.output(pin, GPIO.LOW)
 
         for slot, pin in LED_RED_PINS.items():
-            print(f"  Slot #{slot} RED (GPIO {pin}) ON")
+            print(f"  Slot {slot} RED (GPIO {pin}) ON")
             GPIO.output(pin, GPIO.HIGH)
             time.sleep(0.5)
             GPIO.output(pin, GPIO.LOW)
@@ -134,16 +145,17 @@ def test_leds():
         for pin in list(LED_GREEN_PINS.values()) + list(LED_RED_PINS.values()):
             GPIO.output(pin, GPIO.LOW)
 
-        print("  [PASS] Slot 1 LEDs OK")
-        results["Status LEDs"] = "PASS"
+        print("  [ACTUATED] Pins toggled, confirm visually that LEDs lit")
+        results["Status LEDs"] = "ACTUATED (verify manually)"
         return True
     except Exception as e:
         print(f"  [FAIL] LED error: {e}")
         results["Status LEDs"] = "FAIL"
         return False
 
+
 def test_buzzer():
-    print("\n[TEST 4/9] Testing Active Buzzer...")
+    print("\n[TEST 4/8] Testing Active Buzzer...")
     lcd_print("Testing Buzzer", "Beep x2")
     try:
         for i in range(2):
@@ -151,74 +163,83 @@ def test_buzzer():
             time.sleep(0.1)
             GPIO.output(BUZZER_PIN, GPIO.LOW)
             time.sleep(0.1)
-        print("  [PASS] Buzzer activated (2 beeps)")
-        results["Active Buzzer"] = "PASS"
+        print("  [ACTUATED] Pin toggled x2, confirm audibly that it beeped")
+        results["Active Buzzer"] = "ACTUATED (verify manually)"
         return True
     except Exception as e:
         print(f"  [FAIL] Buzzer error: {e}")
         results["Active Buzzer"] = "FAIL"
         return False
 
-def test_fan():
-    print("\n[TEST 5/9] Testing Brushless Fan DC 5V (Spinning 3s)...")
-    lcd_print("Testing Fan", "Spinning 3s...")
-    try:
-        GPIO.output(FAN_PIN, GPIO.HIGH)
-        print("  Fan ON (GPIO 14 HIGH)")
-        time.sleep(3)
-        GPIO.output(FAN_PIN, GPIO.LOW)
-        print("  Fan OFF")
-        print("  [PASS] Fan switch pulse completed")
-        results["Brushless Fan DC 5V"] = "PASS"
-        return True
-    except Exception as e:
-        print(f"  [FAIL] Fan error: {e}")
-        results["Brushless Fan DC 5V"] = "FAIL"
-        return False
+
+def _check_relay_feedback(pin_key):
+    pin = RELAY_FEEDBACK_PINS.get(pin_key)
+    if pin is None:
+        return None
+    return GPIO.input(pin) == GPIO.LOW
+
 
 def test_solenoids():
-    print("\n[TEST 6/9] Testing Solenoid Relays (Main Lock + Slot 1)...")
+    print("\n[TEST 5/8] Testing Solenoid Relays (Main Lock + Slot 1)...")
     lcd_print("Testing Locks", "Relays click...")
     try:
         print(f"  Main Door Lock (GPIO {MAIN_LOCK_PIN}) -> TRIGGER")
         GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
         time.sleep(0.6)
+        main_fb = _check_relay_feedback("main_lock")
         GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
 
+        slot_fb = {}
         for slot, pin in SLOT_PINS.items():
-            print(f"  Slot #{slot} Solenoid (GPIO {pin}) -> TRIGGER")
+            print(f"  Slot {slot} Solenoid (GPIO {pin}) -> TRIGGER")
             GPIO.output(pin, GPIO.HIGH)
             time.sleep(0.6)
+            slot_fb[slot] = _check_relay_feedback(f"slot_{slot}")
             GPIO.output(pin, GPIO.LOW)
 
-        print("  [PASS] Main Door & Slot 1 Solenoid relays triggered")
-        results["Solenoid Relays"] = "PASS"
-        return True
     except Exception as e:
         print(f"  [FAIL] Solenoid error: {e}")
         results["Solenoid Relays"] = "FAIL"
         return False
 
+    if HAVE_RELAY_FEEDBACK and main_fb is not None and all(v is not None for v in slot_fb.values()):
+        all_ok = main_fb and all(slot_fb.values())
+        if all_ok:
+            print("  [PASS] Relay feedback confirmed on Main Lock and Slot 1")
+            results["Solenoid Relays"] = "PASS"
+            return True
+        else:
+            failed = (["Main Lock"] if not main_fb else []) + [f"Slot {s}" for s, ok in slot_fb.items() if not ok]
+            print(f"  [FAIL] No feedback signal from: {', '.join(failed)}")
+            results["Solenoid Relays"] = f"FAIL ({', '.join(failed)})"
+            return False
+    else:
+        print("  [ACTUATED] Relays triggered, confirm manually you heard/felt both click")
+        results["Solenoid Relays"] = "ACTUATED (verify manually)"
+        return True
+
+
 def test_ir_sensors():
-    print("\n[TEST 7/9] Testing Slot 1 IR Key Presence Sensor...")
+    print("\n[TEST 6/8] Testing Slot 1 IR Key Presence Sensor...")
     lcd_print("Testing IR", "Read Slot 1...")
     try:
         status_list = []
         for slot, pin in IR_SENSOR_PINS.items():
             val = GPIO.input(pin)
             state = "KEY PRESENT" if val == GPIO.LOW else "KEY MISSING"
-            print(f"  Slot #{slot} IR Sensor (GPIO {pin}) -> Value: {val} ({state})")
+            print(f"  Slot {slot} IR Sensor (GPIO {pin}) -> Value: {val} ({state})")
             status_list.append(f"S{slot}:{state[:3]}")
 
         lcd_print("Slot 1 IR Sensor", " ".join(status_list))
         time.sleep(1.5)
-        print("  [PASS] Slot 1 IR sensor pin read successfully")
-        results["IR Sensors"] = "PASS"
+        print("  [READ] Raw value captured, verify by moving a key in/out")
+        results["IR Sensors"] = f"READ ({status_list[0]}, verify manually)"
         return True
     except Exception as e:
         print(f"  [FAIL] IR error: {e}")
         results["IR Sensors"] = "FAIL"
         return False
+
 
 def get_single_distance():
     GPIO.output(ULTRASONIC_TRIG, GPIO.HIGH)
@@ -243,8 +264,9 @@ def get_single_distance():
     duration = pulse_end - pulse_start
     return round((duration * 34300) / 2, 1)
 
+
 def test_ultrasonic():
-    print("\n[TEST 8/9] Testing Ultrasonic Distance Sensor (5 live readings)...")
+    print("\n[TEST 7/8] Testing Ultrasonic Distance Sensor (5 live readings)...")
     lcd_print("Ultrasonic", "Measuring...")
     valid = 0
     dist = None
@@ -267,8 +289,9 @@ def test_ultrasonic():
         results["Ultrasonic Sensor"] = "FAIL"
         return False
 
+
 def test_camera():
-    print("\n[TEST 9/9] Testing Camera & QR Scanner (5 seconds)...")
+    print("\n[TEST 8/8] Testing Camera & QR Scanner (5 seconds)...")
     print("  Hold a QR badge in front of camera (optional)...")
     lcd_print("Camera Active", "Hold QR badge...")
     try:
@@ -278,9 +301,11 @@ def test_camera():
         picam.start()
 
         qr_data = None
+        last_frame = None
         start = time.time()
         while time.time() - start < 5:
             frame = picam.capture_array()
+            last_frame = frame
             decoded = decode(frame)
             for obj in decoded:
                 qr_data = obj.data.decode("utf-8").strip()
@@ -293,6 +318,14 @@ def test_camera():
         picam.stop()
         picam.close()
 
+        brightness = float(np.mean(last_frame)) if last_frame is not None else 0.0
+        print(f"  Mean frame brightness: {brightness:.1f} (threshold {CAMERA_BLACK_THRESHOLD})")
+
+        if brightness < CAMERA_BLACK_THRESHOLD:
+            print("  [FAIL] Frame is effectively black")
+            results["Camera & QR"] = "FAIL (black frame)"
+            return False
+
         if qr_data:
             try:
                 res = requests.post(API_AUTHENTICATE, json={"qr_token": qr_data}, timeout=5)
@@ -304,12 +337,13 @@ def test_camera():
         else:
             results["Camera & QR"] = "PASS (Camera OK)"
 
-        print("  [PASS] Camera operational")
+        print("  [PASS] Camera operational, frame not black")
         return True
     except Exception as e:
         print(f"  [FAIL] Camera error: {e}")
         results["Camera & QR"] = "FAIL"
         return False
+
 
 def main():
     print("=" * 55)
@@ -322,7 +356,6 @@ def main():
     test_lcd()
     test_leds()
     test_buzzer()
-    test_fan()
     test_solenoids()
     test_ir_sensors()
     test_ultrasonic()
@@ -340,6 +373,7 @@ def main():
         lcd.clear()
     GPIO.cleanup()
     print("GPIO Cleaned up. Done.\n")
+
 
 if __name__ == "__main__":
     main()
