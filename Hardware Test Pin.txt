@@ -1,6 +1,6 @@
 1. 16x2 I2C LCD DISPLAY
 LCD Backpack Pin        Raspberry Pi Pin Name       Physical Header Pin
-VCC                     5V Power                    Pin 2 (or Pin 4)
+VCC                     5V Power                    Pin 4
 GND                     Ground (GND)                Pin 6
 SDA                     GPIO 2 (I2C SDA)            Pin 3
 SCL                     GPIO 3 (I2C SCL)            Pin 5
@@ -16,13 +16,6 @@ Buzzer Pin              Raspberry Pi Pin Name       Physical Header Pin
 Signal / VCC (+)        GPIO 18                     Pin 12
 Ground (-)              Ground (GND)                Pin 14
 
-4. BRUSHLESS FAN DC 5V
-Fan Connection          Raspberry Pi Pin Name       Physical Header Pin
-Fan Switch (Signal)     GPIO 14                     Pin 8
-Fan VCC (+ Red Wire)    5V Power                    Pin 2 (or Pin 4)
-Fan GND (- Black Wire)  Switched Ground             Transistor Collector / Drain
-Circuit Ground          Ground (GND)                Pin 6 (Shared Ground)
-
 5. SOLENOID LOCK RELAYS (SLOT 1 + MAIN LOCK)
 Relay Channel           Connected Solenoid          Raspberry Pi Pin Name   Physical Header Pin
 Relay IN1               Slot 1 Solenoid Lock        GPIO 17                 Pin 11
@@ -32,7 +25,7 @@ Relay VCC / GND         5V & GND                    5V Power & GND          Pin 
 6. IR KEY PRESENCE SENSOR (SLOT 1 ONLY)
 IR Sensor Output Pin    Monitored Slot              Raspberry Pi Pin Name   Physical Header Pin
 Slot 1 IR Sensor (DO)   Slot 1 Key Presence         GPIO 4                  Pin 7
-IR VCC / GND            5V (or 3.3V) & GND          Power & Ground          Pin 1 & Pin 9
+IR VCC / GND            5V & GND                    Power & Ground          Pin 2 & Pin 9
 
 7. ULTRASONIC DISTANCE SENSOR (HC-SR04)
 Ultrasonic Pin          Raspberry Pi Pin Name       Physical Header Pin
