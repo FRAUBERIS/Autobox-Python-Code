@@ -11,16 +11,16 @@ Green LED — Slot 1      GPIO 5                      Pin 29
 Red LED — Slot 1        GPIO 12                     Pin 32
 LED Common Ground       Ground (GND)                Pin 34 (or Pin 39)
 
-3. BUZZER
+3. BUZZER 
 Buzzer Pin              Raspberry Pi Pin Name       Physical Header Pin
 Signal / VCC (+)        GPIO 18                     Pin 12
 Ground (-)              Ground (GND)                Pin 14
 
-5. SOLENOID LOCK RELAYS (SLOT 1 + MAIN LOCK)
+4. SOLENOID LOCK RELAYS (SLOT 1 + MAIN LOCK)
 Relay Channel           Connected Solenoid          Raspberry Pi Pin Name   Physical Header Pin
 Relay IN1               Slot 1 Solenoid Lock        GPIO 17                 Pin 11
 Relay IN4               Main Compartment Lock       GPIO 23                 Pin 16
-Relay VCC / GND         5V & GND                    5V Power & GND          Pin 4 & Pin 20
+Relay VCC / GND         5V & GND                    5V Power & GND          Pin 2 & Pin 20
 
 6. IR KEY PRESENCE SENSOR (SLOT 1 ONLY)
 IR Sensor Output Pin    Monitored Slot              Raspberry Pi Pin Name   Physical Header Pin
