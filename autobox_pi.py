@@ -7,15 +7,17 @@ from pyzbar.pyzbar import decode
 from RPLCD.i2c import CharLCD
 import smbus2
 
+ENABLE_LCD = True
+ENABLE_CAMERA = True
+ENABLE_ULTRASONIC = True
+ENABLE_LEDS = True
+ENABLE_IR_SENSORS = True
+ENABLE_SOLENOIDS = True
+ENABLE_MOTOR = True
 
-ENABLE_LCD = True         
-ENABLE_CAMERA = True        
-ENABLE_ULTRASONIC = True    
-ENABLE_LEDS = True          
-ENABLE_IR_SENSORS = True    
-ENABLE_SOLENOIDS = True     
+KEY_PRESENT_STATE = GPIO.HIGH
 
-API_BASE_URL = "http://192.168.1.100:8000"
+API_BASE_URL = "http://192.168.11.130:8000"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 API_KEY_STATUSES = f"{API_BASE_URL}/api/keys"
 API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
@@ -24,6 +26,8 @@ REQUEST_TIMEOUT = 10
 STATUS_POLL_INTERVAL = 30
 UNLOCK_DURATION = 3
 ULTRASONIC_DISTANCE_CM = 50
+MOTOR_RUN_TIME = 2.0
+NO_HAND_WAIT_SECONDS = 5
 
 MAIN_LOCK_PIN = 23
 
@@ -54,6 +58,10 @@ IR_SENSOR_PINS = {
 ULTRASONIC_TRIG = 24
 ULTRASONIC_ECHO = 25
 
+MOTOR_IN1 = 19
+MOTOR_IN2 = 26
+MOTOR_ENA = 21
+
 LCD_I2C_ADDRESS = 0x27
 LCD_I2C_PORT = 1
 
@@ -63,15 +71,13 @@ lcd = None
 def setup_lcd():
     global lcd
     if not ENABLE_LCD:
-        print("[LCD] LCD is disabled in settings.")
         return
     try:
         lcd = CharLCD('PCF8574', LCD_I2C_ADDRESS, port=LCD_I2C_PORT, cols=16, rows=2)
         lcd.clear()
         lcd_print("AUTOBOX Ready", "Scan QR Code")
-        print("[LCD] Initialized successfully.")
     except Exception as e:
-        print(f"[LCD] Failed to init (Check I2C address/connections): {e}")
+        print(f"[LCD ERROR] {e}")
         lcd = None
 
 
@@ -85,14 +91,13 @@ def lcd_print(line1="", line2=""):
         lcd.cursor_pos = (1, 0)
         lcd.write_string(line2[:16])
     except Exception as e:
-        print(f"[LCD] Write error: {e}")
+        print(f"[LCD Write error] {e}")
 
 
 def setup_gpio():
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
 
-    # Solenoid Locks
     if ENABLE_SOLENOIDS:
         GPIO.setup(MAIN_LOCK_PIN, GPIO.OUT)
         GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
@@ -100,7 +105,6 @@ def setup_gpio():
             GPIO.setup(pin, GPIO.OUT)
             GPIO.output(pin, GPIO.LOW)
 
-    # LEDs
     if ENABLE_LEDS:
         for slot, pin in LED_GREEN_PINS.items():
             GPIO.setup(pin, GPIO.OUT)
@@ -111,27 +115,76 @@ def setup_gpio():
 
     if ENABLE_IR_SENSORS:
         for slot, pin in IR_SENSOR_PINS.items():
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setup(pin, GPIO.IN)
 
     if ENABLE_ULTRASONIC:
         GPIO.setup(ULTRASONIC_TRIG, GPIO.OUT)
         GPIO.setup(ULTRASONIC_ECHO, GPIO.IN)
         GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
 
-    print("[GPIO] Connected components initialized successfully.")
+    if ENABLE_MOTOR:
+        GPIO.setup(MOTOR_IN1, GPIO.OUT)
+        GPIO.setup(MOTOR_IN2, GPIO.OUT)
+        GPIO.setup(MOTOR_ENA, GPIO.OUT)
+        GPIO.output(MOTOR_IN1, GPIO.LOW)
+        GPIO.output(MOTOR_IN2, GPIO.LOW)
+        GPIO.output(MOTOR_ENA, GPIO.LOW)
+
+
+def slider_open():
+    if not ENABLE_MOTOR:
+        return
+    GPIO.output(MOTOR_ENA, GPIO.HIGH)
+    GPIO.output(MOTOR_IN1, GPIO.HIGH)
+    GPIO.output(MOTOR_IN2, GPIO.LOW)
+    time.sleep(MOTOR_RUN_TIME)
+    GPIO.output(MOTOR_IN1, GPIO.LOW)
+    GPIO.output(MOTOR_IN2, GPIO.LOW)
+    GPIO.output(MOTOR_ENA, GPIO.LOW)
+
+
+def slider_close():
+    if not ENABLE_MOTOR:
+        return
+    GPIO.output(MOTOR_ENA, GPIO.HIGH)
+    GPIO.output(MOTOR_IN1, GPIO.LOW)
+    GPIO.output(MOTOR_IN2, GPIO.HIGH)
+    time.sleep(MOTOR_RUN_TIME)
+    GPIO.output(MOTOR_IN1, GPIO.LOW)
+    GPIO.output(MOTOR_IN2, GPIO.LOW)
+    GPIO.output(MOTOR_ENA, GPIO.LOW)
+
+
+def wait_no_hand_and_close():
+    if not ENABLE_MOTOR:
+        return
+    no_hand_start = None
+    while True:
+        if person_detected():
+            no_hand_start = None
+            lcd_print("Hand Detected", "Waiting...")
+            time.sleep(0.3)
+        else:
+            if no_hand_start is None:
+                no_hand_start = time.time()
+            elapsed = time.time() - no_hand_start
+            remaining = max(0, int(NO_HAND_WAIT_SECONDS - elapsed))
+            lcd_print("No Hand Detected", f"Closing in {remaining}s")
+            if elapsed >= NO_HAND_WAIT_SECONDS:
+                break
+            time.sleep(0.2)
+    lcd_print("Closing Door...", "Please clear")
+    slider_close()
 
 
 def unlock_main_door():
-    print("[MAIN LOCK] Box door UNLOCKED")
     if ENABLE_SOLENOIDS:
         GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
         time.sleep(UNLOCK_DURATION)
         GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
-    print("[MAIN LOCK] Box door LOCKED")
 
 
 def unlock_slot(slot_number):
-    print(f"[UNLOCK] Slot #{slot_number} UNLOCKED")
     if ENABLE_SOLENOIDS:
         pin = SLOT_PINS.get(slot_number)
         if pin:
@@ -149,8 +202,6 @@ def unlock_slot(slot_number):
         pin = SLOT_PINS.get(slot_number)
         if pin:
             GPIO.output(pin, GPIO.LOW)
-
-    print(f"[LOCK] Slot #{slot_number} LOCKED")
 
 
 def deny_access():
@@ -194,16 +245,12 @@ def person_detected():
 
 
 def is_key_present(slot_number):
-    """
-    Returns True if physical key is present inside the slot (IR output LOW).
-    Returns False if key is removed / not returned yet (IR output HIGH).
-    """
     if not ENABLE_IR_SENSORS:
         return True
     pin = IR_SENSOR_PINS.get(slot_number)
     if pin is None:
         return True
-    return GPIO.input(pin) == GPIO.LOW
+    return GPIO.input(pin) == KEY_PRESENT_STATE
 
 
 def scan_qr_from_camera():
@@ -215,7 +262,6 @@ def scan_qr_from_camera():
         config = picam.create_preview_configuration(main={"size": (640, 480)})
         picam.configure(config)
         picam.start()
-        print("[CAMERA] Scanning for QR code...")
         lcd_print("Scanning QR...", "Hold steady")
         qr_data = None
         start_time = time.time()
@@ -224,7 +270,6 @@ def scan_qr_from_camera():
             decoded = decode(frame)
             for obj in decoded:
                 qr_data = obj.data.decode("utf-8").strip()
-                print(f"[CAMERA] QR Detected: {qr_data}")
                 break
             if qr_data:
                 break
@@ -248,19 +293,10 @@ def authenticate_qr(qr_token, slot_number=None):
     if slot_number is not None:
         payload["slot_number"] = slot_number
     try:
-        print(f"[API] POST {API_AUTHENTICATE} | Payload: {payload}")
         response = requests.post(API_AUTHENTICATE, json=payload, timeout=REQUEST_TIMEOUT)
-        data = response.json()
-        print(f"[API] Response ({response.status_code}): {data}")
-        return data
-    except requests.exceptions.ConnectionError:
-        print("[ERROR] Cannot connect to server.")
-        return None
-    except requests.exceptions.Timeout:
-        print("[ERROR] API request timed out.")
-        return None
+        return response.json()
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"[API ERROR] {e}")
         return None
 
 
@@ -271,7 +307,7 @@ def get_key_statuses():
         if data.get("success"):
             return data.get("keys", [])
     except Exception as e:
-        print(f"[ERROR] Failed to get key statuses: {e}")
+        print(f"[API ERROR] {e}")
     return []
 
 
@@ -279,10 +315,9 @@ def report_missing_key(slot_number):
     try:
         response = requests.post(API_REPORT_MISSING, json={"slot_number": slot_number}, timeout=REQUEST_TIMEOUT)
         data = response.json()
-        print(f"[API] Report Missing Slot #{slot_number}: {data}")
         return data.get("success", False)
     except Exception as e:
-        print(f"[ERROR] Failed to report missing key: {e}")
+        print(f"[API ERROR] {e}")
         return False
 
 
@@ -292,7 +327,6 @@ def process_scan(qr_token):
 
     if result is None:
         lcd_print("Server Error", "Check Network")
-        print("[ERROR] No response from server.")
         deny_access()
         return
 
@@ -301,21 +335,34 @@ def process_scan(qr_token):
         action = result.get("action")
         user_name = result.get("user_name", "")
         key_name = result.get("key_name", "")
-        print(f"ACCESS GRANTED | User: {user_name} | Action: {action} | Slot: #{slot}")
 
         lcd_print(f"GRANTED: {action}", user_name[:16])
         time.sleep(1)
         lcd_print(f"Slot #{slot}", key_name[:16])
 
         if slot:
-            unlock_main_door()
-            unlock_slot(slot)
+            if ENABLE_SOLENOIDS:
+                GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
+                slot_pin = SLOT_PINS.get(slot)
+                if slot_pin:
+                    GPIO.output(slot_pin, GPIO.HIGH)
+
+            slider_open()
+
+            if ENABLE_SOLENOIDS:
+                time.sleep(UNLOCK_DURATION)
+                GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+                slot_pin = SLOT_PINS.get(slot)
+                if slot_pin:
+                    GPIO.output(slot_pin, GPIO.LOW)
+
+            wait_no_hand_and_close()
+            update_key_presence_and_leds()
         else:
             lcd_print("No Slot Found", "Contact Admin")
             deny_access()
     else:
         message = result.get("message", "Access Denied")
-        print(f"ACCESS DENIED: {message}")
         lcd_print("ACCESS DENIED", message[:16])
         deny_access()
 
@@ -324,25 +371,17 @@ def process_scan(qr_token):
 
 
 def update_key_presence_and_leds():
-    """
-    Checks all IR sensors to detect if keys are in slots or not returned yet.
-    Updates Green & Red LEDs accordingly:
-      - Key Present (In Slot / Returned) -> Green LED ON, Red LED OFF
-      - Key Missing / Not Returned Yet   -> Red LED ON, Green LED OFF
-    """
     if not ENABLE_IR_SENSORS:
         return
 
     for slot, pin in IR_SENSOR_PINS.items():
         present = is_key_present(slot)
         if present:
-            # Key is physically inside slot
             if ENABLE_LEDS and slot in LED_GREEN_PINS:
                 GPIO.output(LED_GREEN_PINS[slot], GPIO.HIGH)
             if ENABLE_LEDS and slot in LED_RED_PINS:
                 GPIO.output(LED_RED_PINS[slot], GPIO.LOW)
         else:
-            # Key is taken out / not returned yet
             if ENABLE_LEDS and slot in LED_GREEN_PINS:
                 GPIO.output(LED_GREEN_PINS[slot], GPIO.LOW)
             if ENABLE_LEDS and slot in LED_RED_PINS:
@@ -350,20 +389,13 @@ def update_key_presence_and_leds():
 
 
 def main():
-    print("=" * 55)
-    print("  AUTOBOX - Raspberry Pi Hardware Controller")
-    print("=" * 55)
-
     setup_gpio()
     setup_lcd()
 
-    print("[INFO] Testing server connection...")
     keys = get_key_statuses()
     if keys:
-        print(f"[INFO] Connected to Laravel. {len(keys)} slot(s) online.")
         lcd_print("Server Connected", f"{len(keys)} Slots Active")
     else:
-        print("[WARN] Server unreachable. Running in offline mode.")
         lcd_print("Server Offline", "Retry on scan")
     time.sleep(2)
     lcd_print("AUTOBOX Ready", "Scan QR Code")
@@ -371,51 +403,44 @@ def main():
     last_poll = time.time()
     last_ir_check = time.time()
 
-    # Initial check of key presence on startup
     update_key_presence_and_leds()
 
     try:
         while True:
-            # 1. Key presence & return detection via IR sensors (every 3 seconds)
             if ENABLE_IR_SENSORS and (time.time() - last_ir_check >= 3):
                 update_key_presence_and_leds()
                 last_ir_check = time.time()
 
-            # 2. Hand proximity detection via Ultrasonic Sensor
             hand_present = person_detected()
 
             if hand_present:
-                print("[ULTRASONIC] Hand detected. Scanning for QR code...")
                 lcd_print("Hand Detected", "Scanning QR...")
                 qr_token = scan_qr_from_camera()
                 if qr_token:
                     process_scan(qr_token)
                     update_key_presence_and_leds()
                 else:
-                    print("[CAMERA] No QR detected within scan window.")
                     lcd_print("No QR Detected", "Try again")
                     time.sleep(1)
                     lcd_print("AUTOBOX Ready", "Scan QR Code")
 
-            # 3. Periodic status polling from web API
             if time.time() - last_poll >= STATUS_POLL_INTERVAL:
-                print("[POLL] Fetching key statuses...")
-                keys = get_key_statuses()
-                for k in keys:
-                    print(f"  Slot #{k['slot_number']} - {k['key_name']}: {k['status'].upper()}")
+                get_key_statuses()
                 last_poll = time.time()
 
             time.sleep(0.2)
 
     except KeyboardInterrupt:
-        print("\n[INFO] Shutting down...")
         lcd_print("Shutting Down", "Goodbye!")
 
     finally:
         if lcd:
             lcd.clear()
+        if ENABLE_MOTOR:
+            GPIO.output(MOTOR_IN1, GPIO.LOW)
+            GPIO.output(MOTOR_IN2, GPIO.LOW)
+            GPIO.output(MOTOR_ENA, GPIO.LOW)
         GPIO.cleanup()
-        print("[GPIO] Cleaned up.")
 
 
 if __name__ == "__main__":
