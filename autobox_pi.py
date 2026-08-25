@@ -1,3 +1,4 @@
+import os
 import time
 import requests
 import RPi.GPIO as GPIO
@@ -6,15 +7,22 @@ from pyzbar.pyzbar import decode
 from RPLCD.i2c import CharLCD
 import smbus2
 
-API_BASE_URL = "http://192.168.1.100/autobox/public"
+
+ENABLE_LCD = True         
+ENABLE_CAMERA = True        
+ENABLE_ULTRASONIC = True    
+ENABLE_LEDS = True          
+ENABLE_IR_SENSORS = True    
+ENABLE_SOLENOIDS = True     
+
+API_BASE_URL = "http://192.168.1.100:8000"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 API_KEY_STATUSES = f"{API_BASE_URL}/api/keys"
 API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
-API_SLIDER_EVENT = f"{API_BASE_URL}/api/slider-event"
 
 REQUEST_TIMEOUT = 10
 STATUS_POLL_INTERVAL = 30
-UNLOCK_DURATION = 5
+UNLOCK_DURATION = 3
 ULTRASONIC_DISTANCE_CM = 50
 
 MAIN_LOCK_PIN = 23
@@ -43,38 +51,32 @@ IR_SENSOR_PINS = {
     3: 7,
 }
 
-BUZZER_PIN = 18
 ULTRASONIC_TRIG = 24
 ULTRASONIC_ECHO = 25
-
-# 6V Yellow DC TT Gear Motor & Driver Configuration
-SLIDER_MOTOR_IN1 = 19       # Motor Driver IN1 (GPIO 19 / Pin 35)
-SLIDER_MOTOR_IN2 = 26       # Motor Driver IN2 (GPIO 26 / Pin 37)
-SLIDER_MOTOR_ENA = 21       # Motor Driver ENA PWM speed control (GPIO 21 / Pin 40, set None if jumpered to 5V)
-SLIDER_MOTOR_DURATION = 2.0 # Seconds for TT Gear motor to roll slider open/closed
-SLIDER_MOTOR_SPEED = 80     # PWM speed percentage (0 to 100)
 
 LCD_I2C_ADDRESS = 0x27
 LCD_I2C_PORT = 1
 
 lcd = None
-pwm_ena = None
-slider_state = "CLOSED"  # State can be: "CLOSED", "OPEN", "OPENING", "CLOSING"
 
 
 def setup_lcd():
     global lcd
+    if not ENABLE_LCD:
+        print("[LCD] LCD is disabled in settings.")
+        return
     try:
         lcd = CharLCD('PCF8574', LCD_I2C_ADDRESS, port=LCD_I2C_PORT, cols=16, rows=2)
         lcd.clear()
         lcd_print("AUTOBOX Ready", "Scan QR Code")
+        print("[LCD] Initialized successfully.")
     except Exception as e:
-        print(f"[LCD] Failed to init: {e}")
+        print(f"[LCD] Failed to init (Check I2C address/connections): {e}")
         lcd = None
 
 
 def lcd_print(line1="", line2=""):
-    if not lcd:
+    if not lcd or not ENABLE_LCD:
         return
     try:
         lcd.clear()
@@ -87,150 +89,85 @@ def lcd_print(line1="", line2=""):
 
 
 def setup_gpio():
-    global pwm_ena
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
 
-    GPIO.setup(MAIN_LOCK_PIN, GPIO.OUT)
-    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+    # Solenoid Locks
+    if ENABLE_SOLENOIDS:
+        GPIO.setup(MAIN_LOCK_PIN, GPIO.OUT)
+        GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+        for slot, pin in SLOT_PINS.items():
+            GPIO.setup(pin, GPIO.OUT)
+            GPIO.output(pin, GPIO.LOW)
 
-    for slot, pin in SLOT_PINS.items():
-        GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.LOW)
+    # LEDs
+    if ENABLE_LEDS:
+        for slot, pin in LED_GREEN_PINS.items():
+            GPIO.setup(pin, GPIO.OUT)
+            GPIO.output(pin, GPIO.LOW)
+        for slot, pin in LED_RED_PINS.items():
+            GPIO.setup(pin, GPIO.OUT)
+            GPIO.output(pin, GPIO.LOW)
 
-    for slot, pin in LED_GREEN_PINS.items():
-        GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.LOW)
+    if ENABLE_IR_SENSORS:
+        for slot, pin in IR_SENSOR_PINS.items():
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    for slot, pin in LED_RED_PINS.items():
-        GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.HIGH)
+    if ENABLE_ULTRASONIC:
+        GPIO.setup(ULTRASONIC_TRIG, GPIO.OUT)
+        GPIO.setup(ULTRASONIC_ECHO, GPIO.IN)
+        GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
 
-    for slot, pin in IR_SENSOR_PINS.items():
-        GPIO.setup(pin, GPIO.IN)
-
-    GPIO.setup(BUZZER_PIN, GPIO.OUT)
-    GPIO.output(BUZZER_PIN, GPIO.LOW)
-
-    GPIO.setup(ULTRASONIC_TRIG, GPIO.OUT)
-    GPIO.setup(ULTRASONIC_ECHO, GPIO.IN)
-    GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
-
-    # 6V TT Gear Motor driver pins setup
-    GPIO.setup(SLIDER_MOTOR_IN1, GPIO.OUT)
-    GPIO.setup(SLIDER_MOTOR_IN2, GPIO.OUT)
-
-    if SLIDER_MOTOR_ENA is not None:
-        GPIO.setup(SLIDER_MOTOR_ENA, GPIO.OUT)
-        pwm_ena = GPIO.PWM(SLIDER_MOTOR_ENA, 1000)  # 1kHz PWM frequency
-        pwm_ena.start(0)
-
-    stop_slider()
-
-    print("[GPIO] All pins initialized (including 6V TT Gear Motor).")
-
-
-def stop_slider():
-    GPIO.output(SLIDER_MOTOR_IN1, GPIO.LOW)
-    GPIO.output(SLIDER_MOTOR_IN2, GPIO.LOW)
-    if pwm_ena:
-        pwm_ena.ChangeDutyCycle(0)
-
-
-def open_slider():
-    global slider_state
-    if slider_state == "OPEN":
-        return
-    print("[SLIDER] Hand detected -> Rolling 6V TT Gear Motor OPEN...")
-    lcd_print("Hand Detected", "Opening Slider...")
-    slider_state = "OPENING"
-    
-    if pwm_ena:
-        pwm_ena.ChangeDutyCycle(SLIDER_MOTOR_SPEED)
-    
-    GPIO.output(SLIDER_MOTOR_IN1, GPIO.HIGH)
-    GPIO.output(SLIDER_MOTOR_IN2, GPIO.LOW)
-    time.sleep(SLIDER_MOTOR_DURATION)
-    stop_slider()
-    slider_state = "OPEN"
-    print("[SLIDER] Slider fully OPEN.")
-    report_slider_event("opened", "Hand detected by Ultrasonic sensor")
-
-
-def close_slider():
-    global slider_state
-    if slider_state == "CLOSED":
-        return
-    print("[SLIDER] No hand detected -> Rolling 6V TT Gear Motor CLOSE...")
-    lcd_print("No Hand Detected", "Closing Slider...")
-    slider_state = "CLOSING"
-    
-    if pwm_ena:
-        pwm_ena.ChangeDutyCycle(SLIDER_MOTOR_SPEED)
-        
-    GPIO.output(SLIDER_MOTOR_IN1, GPIO.LOW)
-    GPIO.output(SLIDER_MOTOR_IN2, GPIO.HIGH)
-    time.sleep(SLIDER_MOTOR_DURATION)
-    stop_slider()
-    slider_state = "CLOSED"
-    print("[SLIDER] Slider fully CLOSED.")
-    report_slider_event("closed", "No hand detected by Ultrasonic sensor")
-    lcd_print("AUTOBOX Ready", "Scan QR Code")
-
-
-def report_slider_event(state, reason=""):
-    try:
-        payload = {"state": state, "reason": reason}
-        requests.post(API_SLIDER_EVENT, json=payload, timeout=REQUEST_TIMEOUT)
-    except Exception as e:
-        print(f"[SLIDER API] Failed to send slider event: {e}")
+    print("[GPIO] Connected components initialized successfully.")
 
 
 def unlock_main_door():
     print("[MAIN LOCK] Box door UNLOCKED")
-    GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
-    time.sleep(UNLOCK_DURATION)
-    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+    if ENABLE_SOLENOIDS:
+        GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
+        time.sleep(UNLOCK_DURATION)
+        GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
     print("[MAIN LOCK] Box door LOCKED")
 
 
 def unlock_slot(slot_number):
-    pin = SLOT_PINS.get(slot_number)
-    if pin is None:
-        print(f"[ERROR] Slot {slot_number} not in SLOT_PINS.")
-        return
-    print(f"[UNLOCK] Slot #{slot_number} UNLOCKED for {UNLOCK_DURATION}s")
-    GPIO.output(pin, GPIO.HIGH)
-    if slot_number in LED_GREEN_PINS:
-        GPIO.output(LED_GREEN_PINS[slot_number], GPIO.HIGH)
-    if slot_number in LED_RED_PINS:
-        GPIO.output(LED_RED_PINS[slot_number], GPIO.LOW)
-    beep(1)
+    print(f"[UNLOCK] Slot #{slot_number} UNLOCKED")
+    if ENABLE_SOLENOIDS:
+        pin = SLOT_PINS.get(slot_number)
+        if pin:
+            GPIO.output(pin, GPIO.HIGH)
+
+    if ENABLE_LEDS:
+        if slot_number in LED_GREEN_PINS:
+            GPIO.output(LED_GREEN_PINS[slot_number], GPIO.HIGH)
+        if slot_number in LED_RED_PINS:
+            GPIO.output(LED_RED_PINS[slot_number], GPIO.LOW)
+
     time.sleep(UNLOCK_DURATION)
-    GPIO.output(pin, GPIO.LOW)
-    if slot_number in LED_GREEN_PINS:
-        GPIO.output(LED_GREEN_PINS[slot_number], GPIO.LOW)
-    if slot_number in LED_RED_PINS:
-        GPIO.output(LED_RED_PINS[slot_number], GPIO.HIGH)
+
+    if ENABLE_SOLENOIDS:
+        pin = SLOT_PINS.get(slot_number)
+        if pin:
+            GPIO.output(pin, GPIO.LOW)
+
     print(f"[LOCK] Slot #{slot_number} LOCKED")
 
 
 def deny_access():
-    beep(3)
-    if all(p in LED_RED_PINS for p in [1, 2, 3]):
-        for slot in LED_RED_PINS:
-            GPIO.output(LED_RED_PINS[slot], GPIO.HIGH)
-
-
-def beep(times=1, duration=0.1):
-    for _ in range(times):
-        GPIO.output(BUZZER_PIN, GPIO.HIGH)
-        time.sleep(duration)
-        GPIO.output(BUZZER_PIN, GPIO.LOW)
-        time.sleep(0.1)
+    if ENABLE_LEDS:
+        for _ in range(3):
+            for slot in LED_RED_PINS:
+                GPIO.output(LED_RED_PINS[slot], GPIO.LOW)
+            time.sleep(0.15)
+            for slot in LED_RED_PINS:
+                GPIO.output(LED_RED_PINS[slot], GPIO.HIGH)
+            time.sleep(0.15)
+        update_key_presence_and_leds()
 
 
 def get_distance_cm():
+    if not ENABLE_ULTRASONIC:
+        return 999
     GPIO.output(ULTRASONIC_TRIG, GPIO.HIGH)
     time.sleep(0.00001)
     GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
@@ -253,47 +190,57 @@ def get_distance_cm():
 
 def person_detected():
     distance = get_distance_cm()
-    print(f"[ULTRASONIC] Distance: {distance} cm")
     return distance <= ULTRASONIC_DISTANCE_CM
 
 
 def is_key_present(slot_number):
+    """
+    Returns True if physical key is present inside the slot (IR output LOW).
+    Returns False if key is removed / not returned yet (IR output HIGH).
+    """
+    if not ENABLE_IR_SENSORS:
+        return True
     pin = IR_SENSOR_PINS.get(slot_number)
     if pin is None:
         return True
     return GPIO.input(pin) == GPIO.LOW
 
 
-def check_all_ir_sensors():
-    missing_slots = []
-    for slot, pin in IR_SENSOR_PINS.items():
-        if not is_key_present(slot):
-            missing_slots.append(slot)
-    return missing_slots
-
-
 def scan_qr_from_camera():
-    picam = Picamera2()
-    config = picam.create_preview_configuration(main={"size": (640, 480)})
-    picam.configure(config)
-    picam.start()
-    print("[CAMERA] Scanning for QR code...")
-    lcd_print("Scanning QR...", "Hold steady")
-    qr_data = None
-    start_time = time.time()
-    while time.time() - start_time < 10:
-        frame = picam.capture_array()
-        decoded = decode(frame)
-        for obj in decoded:
-            qr_data = obj.data.decode("utf-8").strip()
-            print(f"[CAMERA] QR Detected: {qr_data}")
-            break
-        if qr_data:
-            break
-        time.sleep(0.1)
-    picam.stop()
-    picam.close()
-    return qr_data
+    if not ENABLE_CAMERA:
+        return None
+    picam = None
+    try:
+        picam = Picamera2()
+        config = picam.create_preview_configuration(main={"size": (640, 480)})
+        picam.configure(config)
+        picam.start()
+        print("[CAMERA] Scanning for QR code...")
+        lcd_print("Scanning QR...", "Hold steady")
+        qr_data = None
+        start_time = time.time()
+        while time.time() - start_time < 8:
+            frame = picam.capture_array()
+            decoded = decode(frame)
+            for obj in decoded:
+                qr_data = obj.data.decode("utf-8").strip()
+                print(f"[CAMERA] QR Detected: {qr_data}")
+                break
+            if qr_data:
+                break
+            time.sleep(0.1)
+        return qr_data
+    except Exception as e:
+        print(f"[CAMERA ERROR] {e}")
+        lcd_print("Camera Error", "Check cable")
+        return None
+    finally:
+        if picam is not None:
+            try:
+                picam.stop()
+                picam.close()
+            except Exception:
+                pass
 
 
 def authenticate_qr(qr_token, slot_number=None):
@@ -372,29 +319,40 @@ def process_scan(qr_token):
         lcd_print("ACCESS DENIED", message[:16])
         deny_access()
 
-    time.sleep(2)
+    time.sleep(1.5)
     lcd_print("AUTOBOX Ready", "Scan QR Code")
 
 
-def run_ir_check():
-    missing_slots = check_all_ir_sensors()
-    for slot in missing_slots:
-        print(f"[IR] Slot #{slot} key is MISSING — reporting to server.")
-        lcd_print(f"Slot #{slot} Missing", "Reporting...")
-        report_missing_key(slot)
-        if slot in LED_RED_PINS:
-            GPIO.output(LED_RED_PINS[slot], GPIO.HIGH)
-        if slot in LED_GREEN_PINS:
-            GPIO.output(LED_GREEN_PINS[slot], GPIO.LOW)
-    if missing_slots:
-        time.sleep(1)
-        lcd_print("AUTOBOX Ready", "Scan QR Code")
+def update_key_presence_and_leds():
+    """
+    Checks all IR sensors to detect if keys are in slots or not returned yet.
+    Updates Green & Red LEDs accordingly:
+      - Key Present (In Slot / Returned) -> Green LED ON, Red LED OFF
+      - Key Missing / Not Returned Yet   -> Red LED ON, Green LED OFF
+    """
+    if not ENABLE_IR_SENSORS:
+        return
+
+    for slot, pin in IR_SENSOR_PINS.items():
+        present = is_key_present(slot)
+        if present:
+            # Key is physically inside slot
+            if ENABLE_LEDS and slot in LED_GREEN_PINS:
+                GPIO.output(LED_GREEN_PINS[slot], GPIO.HIGH)
+            if ENABLE_LEDS and slot in LED_RED_PINS:
+                GPIO.output(LED_RED_PINS[slot], GPIO.LOW)
+        else:
+            # Key is taken out / not returned yet
+            if ENABLE_LEDS and slot in LED_GREEN_PINS:
+                GPIO.output(LED_GREEN_PINS[slot], GPIO.LOW)
+            if ENABLE_LEDS and slot in LED_RED_PINS:
+                GPIO.output(LED_RED_PINS[slot], GPIO.HIGH)
 
 
 def main():
-    print("=" * 50)
-    print("  AUTOBOX - Raspberry Pi Controller")
-    print("=" * 50)
+    print("=" * 55)
+    print("  AUTOBOX - Raspberry Pi Hardware Controller")
+    print("=" * 55)
 
     setup_gpio()
     setup_lcd()
@@ -402,7 +360,7 @@ def main():
     print("[INFO] Testing server connection...")
     keys = get_key_statuses()
     if keys:
-        print(f"[INFO] Connected. {len(keys)} slot(s) online.")
+        print(f"[INFO] Connected to Laravel. {len(keys)} slot(s) online.")
         lcd_print("Server Connected", f"{len(keys)} Slots Active")
     else:
         print("[WARN] Server unreachable. Running in offline mode.")
@@ -413,29 +371,33 @@ def main():
     last_poll = time.time()
     last_ir_check = time.time()
 
+    # Initial check of key presence on startup
+    update_key_presence_and_leds()
+
     try:
         while True:
-            if time.time() - last_ir_check >= 5:
-                run_ir_check()
+            # 1. Key presence & return detection via IR sensors (every 3 seconds)
+            if ENABLE_IR_SENSORS and (time.time() - last_ir_check >= 3):
+                update_key_presence_and_leds()
                 last_ir_check = time.time()
 
+            # 2. Hand proximity detection via Ultrasonic Sensor
             hand_present = person_detected()
 
             if hand_present:
-                if slider_state != "OPEN":
-                    open_slider()
-
                 print("[ULTRASONIC] Hand detected. Scanning for QR code...")
                 lcd_print("Hand Detected", "Scanning QR...")
                 qr_token = scan_qr_from_camera()
                 if qr_token:
                     process_scan(qr_token)
+                    update_key_presence_and_leds()
                 else:
                     print("[CAMERA] No QR detected within scan window.")
-            else:
-                if slider_state != "CLOSED":
-                    close_slider()
+                    lcd_print("No QR Detected", "Try again")
+                    time.sleep(1)
+                    lcd_print("AUTOBOX Ready", "Scan QR Code")
 
+            # 3. Periodic status polling from web API
             if time.time() - last_poll >= STATUS_POLL_INTERVAL:
                 print("[POLL] Fetching key statuses...")
                 keys = get_key_statuses()
@@ -450,7 +412,6 @@ def main():
         lcd_print("Shutting Down", "Goodbye!")
 
     finally:
-        stop_slider()
         if lcd:
             lcd.clear()
         GPIO.cleanup()
