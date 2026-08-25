@@ -1,0 +1,36 @@
+Component                      BCM (code)      Physical Pin    Connection / Circuit Description
+---------------------------------------------------------------------------------------------------------------------------------
+LCD SDA (I2C)                  GPIO 2          Pin 3           I2C Serial Data (to 16x2 LCD PCF8574 I2C Backpack)
+LCD SCL (I2C)                  GPIO 3          Pin 5           I2C Serial Clock (to 16x2 LCD PCF8574 I2C Backpack)
+IR Sensor Slot 1               GPIO 4          Pin 7           Slot 1 IR Sensor Digital Output (DO / OUT pin)
+Slot 1 Solenoid (Relay)        GPIO 17         Pin 11          Slot 1 Solenoid Lock (via 5V Multi-Channel Relay IN1)
+Slot 2 Solenoid (Relay)        GPIO 27         Pin 13          Slot 2 Solenoid Lock (via 5V Multi-Channel Relay IN2)
+Slot 3 Solenoid (Relay)        GPIO 22         Pin 15          Slot 3 Solenoid Lock (via 5V Multi-Channel Relay IN3)
+Main Door Lock (Relay)         GPIO 23         Pin 16          Main Compartment Lock (via 5V Multi-Channel Relay IN4)
+Ultrasonic TRIG                GPIO 24         Pin 18          HC-SR04 Proximity Sensor Trigger Pulse (TRIG pin)
+Ultrasonic ECHO                GPIO 25         Pin 22          HC-SR04 Echo Output (via 1kΩ / 2kΩ Voltage Divider to 3.3V)
+IR Sensor Slot 2               GPIO 8          Pin 24          Slot 2 IR Sensor Digital Output (DO / OUT pin)
+IR Sensor Slot 3               GPIO 7          Pin 26          Slot 3 IR Sensor Digital Output (DO / OUT pin)
+Green LED Slot 1               GPIO 5          Pin 29          Slot 1 Available Green LED (via 220Ω / 330Ω Resistor)
+Green LED Slot 2               GPIO 6          Pin 31          Slot 2 Available Green LED (via 220Ω / 330Ω Resistor)
+Red LED Slot 1                 GPIO 12         Pin 32          Slot 1 Locked/Missing Red LED (via 220Ω / 330Ω Resistor)
+Green LED Slot 3               GPIO 13         Pin 33          Slot 3 Available Green LED (via 220Ω / 330Ω Resistor)
+Red LED Slot 2                 GPIO 16         Pin 36          Slot 2 Locked/Missing Red LED (via 220Ω / 330Ω Resistor)
+Red LED Slot 3                 GPIO 20         Pin 38          Slot 3 Locked/Missing Red LED (via 220Ω / 330Ω Resistor)
+
+---------------------------------------------------------------------------------------------------------------------------------
+6V YELLOW DC TT GEAR MOTOR & DRIVER CONNECTIONS (SLIDER)
+---------------------------------------------------------------------------------------------------------------------------------
+DC Motor Slider IN1            GPIO 19         Pin 35          L298N / Driver Direction Logic IN1 (Forward / Open)
+DC Motor Slider IN2            GPIO 26         Pin 37          L298N / Driver Direction Logic IN2 (Reverse / Close)
+DC Motor Slider ENA (PWM)      GPIO 21         Pin 40          L298N / Driver PWM Speed Control ENA (or 5V Jumpered)
+Motor Power VCC                6V - 9V Ext     External        External Battery / Power Supply (+) to Motor Driver VCC
+Motor Ground GND               GND             Pin 6 / Shared  Common Ground to Pi GND & Power Supply (-)
+
+---------------------------------------------------------------------------------------------------------------------------------
+POWER & GROUND REFERENCE PINS (RASPBERRY PI 40-PIN HEADER)
+---------------------------------------------------------------------------------------------------------------------------------
+5V Power Rail (VCC)            5V              Pin 2, Pin 4    Supplies 5V to LCD Backpack, Relays, Sensors & Fan
+3.3V Power Rail (VCC)          3.3V            Pin 1, Pin 17   Supplies 3.3V Logic (if needed)
+Ground (GND)                   GND             Pin 6, 9, 14, 20, 25, 30, 34, 39 (Shared Common Ground)        
+
