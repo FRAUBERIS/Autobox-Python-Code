@@ -17,7 +17,7 @@ ENABLE_MOTOR = True
 
 KEY_PRESENT_STATE = GPIO.HIGH
 
-API_BASE_URL = "http://192.168.11.130:8000"
+API_BASE_URL = "http://192.168.1.100:8000"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 API_KEY_STATUSES = f"{API_BASE_URL}/api/keys"
 API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
@@ -25,7 +25,7 @@ API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
 REQUEST_TIMEOUT = 10
 STATUS_POLL_INTERVAL = 30
 UNLOCK_DURATION = 3
-ULTRASONIC_DISTANCE_CM = 50
+ULTRASONIC_DISTANCE_CM = 20
 MOTOR_RUN_TIME = 2.0
 NO_HAND_WAIT_SECONDS = 5
 
@@ -219,24 +219,40 @@ def deny_access():
 def get_distance_cm():
     if not ENABLE_ULTRASONIC:
         return 999
-    GPIO.output(ULTRASONIC_TRIG, GPIO.HIGH)
-    time.sleep(0.00001)
-    GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
-    pulse_start = time.time()
-    pulse_end = time.time()
-    timeout = time.time() + 0.04
-    while GPIO.input(ULTRASONIC_ECHO) == 0:
+
+    readings = []
+    for _ in range(3):
+        GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
+        time.sleep(0.002)
+        GPIO.output(ULTRASONIC_TRIG, GPIO.HIGH)
+        time.sleep(0.00001)
+        GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
+
         pulse_start = time.time()
-        if pulse_start > timeout:
-            return 999
-    timeout = time.time() + 0.04
-    while GPIO.input(ULTRASONIC_ECHO) == 1:
         pulse_end = time.time()
-        if pulse_end > timeout:
-            return 999
-    duration = pulse_end - pulse_start
-    distance = (duration * 34300) / 2
-    return round(distance, 2)
+        timeout = time.time() + 0.03
+
+        while GPIO.input(ULTRASONIC_ECHO) == 0:
+            pulse_start = time.time()
+            if pulse_start > timeout:
+                break
+
+        timeout = time.time() + 0.03
+        while GPIO.input(ULTRASONIC_ECHO) == 1:
+            pulse_end = time.time()
+            if pulse_end > timeout:
+                break
+
+        duration = pulse_end - pulse_start
+        dist = round((duration * 34300) / 2, 1)
+
+        if 2.0 <= dist <= 300.0:
+            readings.append(dist)
+
+    if len(readings) > 0:
+        readings.sort()
+        return readings[len(readings) // 2]
+    return 999
 
 
 def person_detected():
@@ -341,28 +357,37 @@ def process_scan(qr_token):
         lcd_print(f"Slot #{slot}", key_name[:16])
 
         if slot:
+            # 1. Energize Solenoids to Unlock
             if ENABLE_SOLENOIDS:
+                print(f"[AUTOBOX] Unlocking Main Door and Slot #{slot}...")
                 GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
                 slot_pin = SLOT_PINS.get(slot)
                 if slot_pin:
                     GPIO.output(slot_pin, GPIO.HIGH)
 
+            # 2. Open Motorized Slider Door
+            print("[AUTOBOX] Opening motorized slider door...")
             slider_open()
 
+            # 3. Wait for hand to finish and 5s countdown with no hand detected, then close door
+            print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
+            wait_no_hand_and_close()
+
+            # 4. Relock Solenoids after door has finished closing
             if ENABLE_SOLENOIDS:
-                time.sleep(UNLOCK_DURATION)
+                print(f"[AUTOBOX] Relocking Main Door and Slot #{slot}...")
                 GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
                 slot_pin = SLOT_PINS.get(slot)
                 if slot_pin:
                     GPIO.output(slot_pin, GPIO.LOW)
 
-            wait_no_hand_and_close()
             update_key_presence_and_leds()
         else:
             lcd_print("No Slot Found", "Contact Admin")
             deny_access()
     else:
         message = result.get("message", "Access Denied")
+        print(f"[AUTOBOX] Access Denied: {message}")
         lcd_print("ACCESS DENIED", message[:16])
         deny_access()
 
