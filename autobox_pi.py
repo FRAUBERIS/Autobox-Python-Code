@@ -17,7 +17,7 @@ ENABLE_MOTOR = True
 
 KEY_PRESENT_STATE = GPIO.HIGH
 
-API_BASE_URL = "http://192.168.1.100:8000"
+API_BASE_URL = "http://192.168.11.130:8000"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 API_KEY_STATUSES = f"{API_BASE_URL}/api/keys"
 API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
@@ -269,39 +269,38 @@ def is_key_present(slot_number):
     return GPIO.input(pin) == KEY_PRESENT_STATE
 
 
-def scan_qr_from_camera():
+picam = None
+
+
+def setup_camera():
+    global picam
     if not ENABLE_CAMERA:
-        return None
-    picam = None
+        return
     try:
         picam = Picamera2()
         config = picam.create_preview_configuration(main={"size": (640, 480)})
         picam.configure(config)
         picam.start()
-        lcd_print("Scanning QR...", "Hold steady")
-        qr_data = None
-        start_time = time.time()
-        while time.time() - start_time < 8:
-            frame = picam.capture_array()
-            decoded = decode(frame)
-            for obj in decoded:
-                qr_data = obj.data.decode("utf-8").strip()
-                break
-            if qr_data:
-                break
-            time.sleep(0.1)
-        return qr_data
+        print("[CAMERA] Camera initialized - Continuous QR Scanning Active.")
     except Exception as e:
         print(f"[CAMERA ERROR] {e}")
         lcd_print("Camera Error", "Check cable")
+        picam = None
+
+
+def get_qr_frame():
+    if not picam or not ENABLE_CAMERA:
         return None
-    finally:
-        if picam is not None:
-            try:
-                picam.stop()
-                picam.close()
-            except Exception:
-                pass
+    try:
+        frame = picam.capture_array()
+        decoded = decode(frame)
+        for obj in decoded:
+            qr_data = obj.data.decode("utf-8").strip()
+            if qr_data:
+                return qr_data
+    except Exception:
+        pass
+    return None
 
 
 def authenticate_qr(qr_token, slot_number=None):
@@ -317,14 +316,24 @@ def authenticate_qr(qr_token, slot_number=None):
 
 
 def get_key_statuses():
+    global known_key_statuses
     try:
         response = requests.get(API_KEY_STATUSES, timeout=REQUEST_TIMEOUT)
         data = response.json()
         if data.get("success"):
-            return data.get("keys", [])
+            keys = data.get("keys", [])
+            for k in keys:
+                slot = k.get("slot_number")
+                if slot:
+                    known_key_statuses[slot] = k
+            return keys
     except Exception as e:
         print(f"[API ERROR] {e}")
     return []
+
+
+reported_missing_slots = set()
+known_key_statuses = {}
 
 
 def report_missing_key(slot_number):
@@ -357,31 +366,27 @@ def process_scan(qr_token):
         lcd_print(f"Slot #{slot}", key_name[:16])
 
         if slot:
-            # 1. Energize Solenoids to Unlock
             if ENABLE_SOLENOIDS:
-                print(f"[AUTOBOX] Unlocking Main Door and Slot #{slot}...")
+                print(f"[AUTOBOX] Unlatching Main Door & Slot #{slot}...")
                 GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
                 slot_pin = SLOT_PINS.get(slot)
                 if slot_pin:
                     GPIO.output(slot_pin, GPIO.HIGH)
 
-            # 2. Open Motorized Slider Door
             print("[AUTOBOX] Opening motorized slider door...")
             slider_open()
 
-            # 3. Wait for hand to finish and 5s countdown with no hand detected, then close door
-            print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
-            wait_no_hand_and_close()
-
-            # 4. Relock Solenoids after door has finished closing
             if ENABLE_SOLENOIDS:
-                print(f"[AUTOBOX] Relocking Main Door and Slot #{slot}...")
                 GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
                 slot_pin = SLOT_PINS.get(slot)
                 if slot_pin:
                     GPIO.output(slot_pin, GPIO.LOW)
 
+            print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
+            wait_no_hand_and_close()
+
             update_key_presence_and_leds()
+            get_key_statuses()
         else:
             lcd_print("No Slot Found", "Contact Admin")
             deny_access()
@@ -396,6 +401,7 @@ def process_scan(qr_token):
 
 
 def update_key_presence_and_leds():
+    global reported_missing_slots, known_key_statuses
     if not ENABLE_IR_SENSORS:
         return
 
@@ -406,16 +412,27 @@ def update_key_presence_and_leds():
                 GPIO.output(LED_GREEN_PINS[slot], GPIO.HIGH)
             if ENABLE_LEDS and slot in LED_RED_PINS:
                 GPIO.output(LED_RED_PINS[slot], GPIO.LOW)
+            
+            if slot in reported_missing_slots:
+                reported_missing_slots.discard(slot)
         else:
             if ENABLE_LEDS and slot in LED_GREEN_PINS:
                 GPIO.output(LED_GREEN_PINS[slot], GPIO.LOW)
             if ENABLE_LEDS and slot in LED_RED_PINS:
                 GPIO.output(LED_RED_PINS[slot], GPIO.HIGH)
 
+            key_info = known_key_statuses.get(slot)
+            if key_info and key_info.get("status") == "available" and slot not in reported_missing_slots:
+                print(f"[AUTOBOX ALERT] Key Slot #{slot} is physically MISSING! Reporting to Laravel...")
+                if report_missing_key(slot):
+                    reported_missing_slots.add(slot)
+                    print(f"[AUTOBOX ALERT] Slot #{slot} successfully flagged as MISSING in Laravel database.")
+
 
 def main():
     setup_gpio()
     setup_lcd()
+    setup_camera()
 
     keys = get_key_statuses()
     if keys:
@@ -436,29 +453,29 @@ def main():
                 update_key_presence_and_leds()
                 last_ir_check = time.time()
 
-            hand_present = person_detected()
-
-            if hand_present:
-                lcd_print("Hand Detected", "Scanning QR...")
-                qr_token = scan_qr_from_camera()
-                if qr_token:
-                    process_scan(qr_token)
-                    update_key_presence_and_leds()
-                else:
-                    lcd_print("No QR Detected", "Try again")
-                    time.sleep(1)
-                    lcd_print("AUTOBOX Ready", "Scan QR Code")
+            qr_token = get_qr_frame()
+            if qr_token:
+                print(f"[AUTOBOX] QR Code Read: {qr_token}")
+                process_scan(qr_token)
+                update_key_presence_and_leds()
+                time.sleep(1.5)  
 
             if time.time() - last_poll >= STATUS_POLL_INTERVAL:
                 get_key_statuses()
                 last_poll = time.time()
 
-            time.sleep(0.2)
+            time.sleep(0.05)
 
     except KeyboardInterrupt:
         lcd_print("Shutting Down", "Goodbye!")
 
     finally:
+        if picam:
+            try:
+                picam.stop()
+                picam.close()
+            except Exception:
+                pass
         if lcd:
             lcd.clear()
         if ENABLE_MOTOR:
