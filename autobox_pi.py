@@ -15,7 +15,7 @@ ENABLE_IR_SENSORS = True
 ENABLE_SOLENOIDS = True
 ENABLE_MOTOR = True
 
-KEY_PRESENT_STATE = GPIO.HIGH
+KEY_PRESENT_STATE = GPIO.LOW
 
 API_BASE_URL = "http://192.168.11.130:8000"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
@@ -115,7 +115,7 @@ def setup_gpio():
 
     if ENABLE_IR_SENSORS:
         for slot, pin in IR_SENSOR_PINS.items():
-            GPIO.setup(pin, GPIO.IN)
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
     if ENABLE_ULTRASONIC:
         GPIO.setup(ULTRASONIC_TRIG, GPIO.OUT)
@@ -367,7 +367,7 @@ def process_scan(qr_token):
 
         if slot:
             if ENABLE_SOLENOIDS:
-                print(f"[AUTOBOX] Unlatching Main Door & Slot #{slot}...")
+                print(f"[AUTOBOX] Unlocking Main Door and Slot #{slot}...")
                 GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
                 slot_pin = SLOT_PINS.get(slot)
                 if slot_pin:
@@ -378,12 +378,15 @@ def process_scan(qr_token):
 
             if ENABLE_SOLENOIDS:
                 GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
-                slot_pin = SLOT_PINS.get(slot)
-                if slot_pin:
-                    GPIO.output(slot_pin, GPIO.LOW)
 
             print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
             wait_no_hand_and_close()
+
+            if ENABLE_SOLENOIDS:
+                slot_pin = SLOT_PINS.get(slot)
+                if slot_pin:
+                    print(f"[AUTOBOX] Relocking Slot #{slot}...")
+                    GPIO.output(slot_pin, GPIO.LOW)
 
             update_key_presence_and_leds()
             get_key_statuses()
@@ -426,6 +429,7 @@ def update_key_presence_and_leds():
                 print(f"[AUTOBOX ALERT] Key Slot #{slot} is physically MISSING! Reporting to Laravel...")
                 if report_missing_key(slot):
                     reported_missing_slots.add(slot)
+                    known_key_statuses[slot]["status"] = "missing"
                     print(f"[AUTOBOX ALERT] Slot #{slot} successfully flagged as MISSING in Laravel database.")
 
 
