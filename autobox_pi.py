@@ -61,9 +61,9 @@ LED_RED_PINS = {
 }
 
 IR_SENSOR_PINS = {
-    1: 4,
-    2: 7,
-    3: 8,
+    1: 4,   # Slot 1: GPIO 4
+    2: 7,   # Slot 2: GPIO 7
+    3: 8,   # Slot 3: GPIO 8
 }
 
 ULTRASONIC_TRIG = 24
@@ -618,8 +618,11 @@ def get_key_statuses():
             keys = data.get("keys", [])
             for k in keys:
                 slot = k.get("slot_number")
-                if slot:
-                    known_key_statuses[slot] = k
+                if slot is not None:
+                    try:
+                        known_key_statuses[int(slot)] = k
+                    except (ValueError, TypeError):
+                        known_key_statuses[slot] = k
             return keys
     except Exception as e:
         print(f"[API ERROR] {e}")
@@ -628,6 +631,10 @@ def get_key_statuses():
 
 reported_missing_slots = set()
 known_key_statuses = {}
+# Debounce: count how many consecutive IR checks each slot read as empty
+# Only report missing after MISSING_DEBOUNCE_COUNT consecutive empty reads
+MISSING_DEBOUNCE_COUNT = 3
+slot_empty_counter = {}
 
 
 def report_missing_key(slot_number):
@@ -650,7 +657,11 @@ def process_scan(qr_token):
         return
 
     if result.get("success") and result.get("status") == "GRANTED":
-        slot = result.get("slot_number")
+        raw_slot = result.get("slot_number")
+        try:
+            slot = int(raw_slot) if raw_slot is not None else None
+        except (ValueError, TypeError):
+            slot = raw_slot
         action = result.get("action")
         user_name = result.get("user_name", "")
         key_name = result.get("key_name", "")
@@ -686,7 +697,17 @@ def process_scan(qr_token):
                     print(f"[AUTOBOX] Relocking Slot #{slot}...")
                     GPIO.output(slot_pin, GPIO.LOW)
 
-            # Refresh key statuses from server first so we know the key was legitimately borrowed
+            # Immediately mark this slot as 'borrowed' locally so the IR sensor
+            # does NOT falsely report it as missing before the next DB poll.
+            if slot in known_key_statuses:
+                known_key_statuses[slot]["status"] = "borrowed"
+            else:
+                known_key_statuses[slot] = {"status": "borrowed", "slot_number": slot}
+
+            # Also add to reported_missing_slots guard so it's never flagged missing right after borrow
+            reported_missing_slots.discard(slot)
+
+            # Refresh key statuses from server, then sync LED/IR state
             get_key_statuses()
             update_key_presence_and_leds()
         else:
@@ -703,13 +724,20 @@ def process_scan(qr_token):
 
 
 def update_key_presence_and_leds():
-    global reported_missing_slots, known_key_statuses
+    global reported_missing_slots, known_key_statuses, slot_empty_counter
     if not ENABLE_IR_SENSORS:
         return
 
     for slot, pin in IR_SENSOR_PINS.items():
         present = is_key_present(slot)
+        key_info = known_key_statuses.get(slot)
+        key_name = key_info.get("key_name", f"Slot {slot}") if key_info else f"Slot {slot}"
+        db_status = key_info.get("status", "unknown") if key_info else "unknown"
+
         if present:
+            # Key is back — reset debounce counter and clear any missing flags
+            slot_empty_counter[slot] = 0
+            print(f"[IR] Slot #{slot} ({key_name}): KEY PRESENT  [DB: {db_status}]")
             if ENABLE_LEDS and slot in LED_GREEN_PINS:
                 GPIO.output(LED_GREEN_PINS[slot], GPIO.HIGH)
             if ENABLE_LEDS and slot in LED_RED_PINS:
@@ -723,8 +751,18 @@ def update_key_presence_and_leds():
             if ENABLE_LEDS and slot in LED_RED_PINS:
                 GPIO.output(LED_RED_PINS[slot], GPIO.HIGH)
 
-            key_info = known_key_statuses.get(slot)
-            if key_info and key_info.get("status") == "available" and slot not in reported_missing_slots:
+            # Increment debounce counter — only report missing after MISSING_DEBOUNCE_COUNT
+            # consecutive empty readings to avoid false triggers from vibration/noise
+            slot_empty_counter[slot] = slot_empty_counter.get(slot, 0) + 1
+            count = slot_empty_counter[slot]
+            print(f"[IR] Slot #{slot} ({key_name}): EMPTY  [DB: {db_status}]  (empty count: {count}/{MISSING_DEBOUNCE_COUNT})")
+
+            if (
+                key_info
+                and db_status == "available"
+                and slot not in reported_missing_slots
+                and count >= MISSING_DEBOUNCE_COUNT
+            ):
                 print(f"[AUTOBOX ALERT] Key Slot #{slot} is physically MISSING! Reporting to Laravel...")
                 if report_missing_key(slot):
                     reported_missing_slots.add(slot)
@@ -765,6 +803,8 @@ def main():
         while True:
             now = time.time()
             if ENABLE_IR_SENSORS and (now - last_ir_check >= 3):
+                # Always refresh DB statuses first so IR sensor compares against live data
+                get_key_statuses()
                 update_key_presence_and_leds()
                 last_ir_check = now
 
