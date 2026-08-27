@@ -26,7 +26,7 @@ REQUEST_TIMEOUT = 10
 STATUS_POLL_INTERVAL = 30
 UNLOCK_DURATION = 3
 ULTRASONIC_DISTANCE_CM = 20
-MOTOR_RUN_TIME = 2.0
+MOTOR_RUN_TIME = 3.0
 NO_HAND_WAIT_SECONDS = 5
 
 MAIN_LOCK_PIN = 23
@@ -376,13 +376,16 @@ def process_scan(qr_token):
             print("[AUTOBOX] Opening motorized slider door...")
             slider_open()
 
-            if ENABLE_SOLENOIDS:
-                GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+            # Main lock stays energized (unlocked) here on purpose.
+            # It only relocks below, after wait_no_hand_and_close() has
+            # actually closed the slider — so the door can't relock while
+            # a hand is present or before the slider finishes its cycle.
 
             print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
             wait_no_hand_and_close()
 
             if ENABLE_SOLENOIDS:
+                GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
                 slot_pin = SLOT_PINS.get(slot)
                 if slot_pin:
                     print(f"[AUTOBOX] Relocking Slot #{slot}...")
@@ -415,7 +418,7 @@ def update_key_presence_and_leds():
                 GPIO.output(LED_GREEN_PINS[slot], GPIO.HIGH)
             if ENABLE_LEDS and slot in LED_RED_PINS:
                 GPIO.output(LED_RED_PINS[slot], GPIO.LOW)
-            
+
             if slot in reported_missing_slots:
                 reported_missing_slots.discard(slot)
         else:
@@ -462,7 +465,7 @@ def main():
                 print(f"[AUTOBOX] QR Code Read: {qr_token}")
                 process_scan(qr_token)
                 update_key_presence_and_leds()
-                time.sleep(1.5)  
+                time.sleep(1.5)
 
             if time.time() - last_poll >= STATUS_POLL_INTERVAL:
                 get_key_statuses()
