@@ -1,5 +1,7 @@
 import os
 import time
+import json
+from datetime import datetime
 import requests
 import RPi.GPIO as GPIO
 from picamera2 import Picamera2
@@ -21,6 +23,15 @@ API_BASE_URL = "http://192.168.11.130:8000"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 API_KEY_STATUSES = f"{API_BASE_URL}/api/keys"
 API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
+API_OFFLINE_CACHE = f"{API_BASE_URL}/api/offline-cache"
+API_SYNC_LOGS = f"{API_BASE_URL}/api/sync-offline-logs"
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OFFLINE_CACHE_FILE = os.path.join(SCRIPT_DIR, "offline_cache.json")
+PENDING_SYNC_FILE = os.path.join(SCRIPT_DIR, "pending_sync_logs.json")
+
+CACHE_REFRESH_INTERVAL = 300
+SYNC_RETRY_INTERVAL = 60
 
 REQUEST_TIMEOUT = 10
 STATUS_POLL_INTERVAL = 30
@@ -303,16 +314,299 @@ def get_qr_frame():
     return None
 
 
+def load_offline_cache():
+    if not os.path.exists(OFFLINE_CACHE_FILE):
+        return {"users": {}, "keys": {}, "timestamp": None}
+    try:
+        with open(OFFLINE_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[CACHE READ ERROR] {e}")
+        return {"users": {}, "keys": {}, "timestamp": None}
+
+
+def save_offline_cache(cache_data):
+    try:
+        with open(OFFLINE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, indent=2)
+    except Exception as e:
+        print(f"[CACHE WRITE ERROR] {e}")
+
+
+def load_pending_logs():
+    if not os.path.exists(PENDING_SYNC_FILE):
+        return []
+    try:
+        with open(PENDING_SYNC_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"[PENDING READ ERROR] {e}")
+        return []
+
+
+def append_pending_log(item):
+    logs = load_pending_logs()
+    logs.append(item)
+    try:
+        with open(PENDING_SYNC_FILE, "w", encoding="utf-8") as f:
+            json.dump(logs, f, indent=2)
+        print(f"[OFFLINE QUEUE] Saved event to pending sync queue (Total queued: {len(logs)})")
+    except Exception as e:
+        print(f"[PENDING WRITE ERROR] {e}")
+
+
+def clear_pending_logs():
+    try:
+        with open(PENDING_SYNC_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f)
+    except Exception as e:
+        print(f"[PENDING CLEAR ERROR] {e}")
+
+
+def refresh_offline_cache():
+    """Fetch latest active users, schedules, and keys from Laravel and cache locally."""
+    try:
+        response = requests.get(API_OFFLINE_CACHE, timeout=REQUEST_TIMEOUT)
+        data = response.json()
+        if data.get("success"):
+            save_offline_cache(data)
+            user_count = len(data.get("users", {}))
+            key_count = len(data.get("keys", {}))
+            print(f"[CACHE] Offline cache updated successfully: {user_count} user(s), {key_count} key slot(s).")
+            return True
+    except Exception as e:
+        print(f"[CACHE] Server unavailable for cache refresh: {e}")
+    return False
+
+
+def sync_pending_logs():
+    """Upload queued offline transactions and access logs to Laravel once online."""
+    pending = load_pending_logs()
+    if not pending:
+        return True
+
+    print(f"[SYNC] Attempting to upload {len(pending)} queued offline event(s) to Laravel...")
+    try:
+        response = requests.post(API_SYNC_LOGS, json={"logs": pending}, timeout=REQUEST_TIMEOUT)
+        data = response.json()
+        if data.get("success"):
+            synced = data.get("synced_count", len(pending))
+            print(f"[SYNC SUCCESS] Successfully synced {synced} offline event(s) to Laravel!")
+            clear_pending_logs()
+            refresh_offline_cache()
+            return True
+        else:
+            print(f"[SYNC WARNING] Server responded but could not complete sync: {data.get('message')}")
+    except Exception as e:
+        print(f"[SYNC WAITING] Server unreachable for sync: {e}")
+    return False
+
+
+def authenticate_qr_offline(qr_token, slot_number=None):
+    """Authenticate QR token against local offline cache when network is down."""
+    cache = load_offline_cache()
+    users = cache.get("users", {})
+    keys = cache.get("keys", {})
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if not users:
+        print("[OFFLINE AUTH] No cached users found in offline_cache.json")
+        return {
+            "success": False,
+            "status": "DENIED",
+            "message": "No Offline Cache",
+            "offline": True,
+        }
+
+    user = users.get(qr_token)
+    if not user or not user.get("is_active"):
+        reason = "Invalid or inactive QR code (Offline)"
+        print(f"[OFFLINE AUTH] Denied: {reason}")
+        append_pending_log({
+            "type": "access_log",
+            "user_id": user.get("id") if user else None,
+            "qr_token": qr_token,
+            "action": "scan",
+            "result": "denied",
+            "reason": reason,
+            "timestamp": now_str,
+        })
+        return {
+            "success": False,
+            "status": "DENIED",
+            "message": "Invalid QR Code",
+            "offline": True,
+        }
+
+    # Check if user currently has an unreturned borrowed key (ACTION: RETURN)
+    borrowed_key = None
+    for s_num, k in keys.items():
+        if k.get("borrowed_by_user_id") == user["id"] and k.get("status") == "borrowed":
+            borrowed_key = k
+            break
+
+    if borrowed_key:
+        slot = int(borrowed_key.get("slot_number"))
+        borrowed_key["status"] = "available"
+        borrowed_key["borrowed_by_user_id"] = None
+        save_offline_cache(cache)
+
+        append_pending_log({
+            "type": "transaction",
+            "user_id": user["id"],
+            "key_id": borrowed_key.get("id"),
+            "slot_number": slot,
+            "action": "return",
+            "notes": "Returned via Offline QR Scan",
+            "timestamp": now_str,
+        })
+        append_pending_log({
+            "type": "access_log",
+            "user_id": user["id"],
+            "qr_token": qr_token,
+            "action": "return",
+            "result": "granted",
+            "reason": f"Offline return: Key returned to Slot #{slot}",
+            "timestamp": now_str,
+        })
+
+        return {
+            "success": True,
+            "status": "GRANTED",
+            "action": "RETURN",
+            "slot_number": slot,
+            "key_name": borrowed_key.get("key_name", f"Slot #{slot}"),
+            "user_name": user.get("name", "User"),
+            "message": f"Access Granted: Return Key to Slot #{slot}",
+            "offline": True,
+        }
+
+    # ACTION: BORROW KEY
+    target_key = None
+    if user.get("role") == "admin":
+        if slot_number is not None:
+            target_key = keys.get(str(slot_number)) or keys.get(int(slot_number))
+        else:
+            for s_num, k in keys.items():
+                if k.get("status") == "available":
+                    target_key = k
+                    break
+    else:
+        # Regular user: Check active schedule
+        now_dt = datetime.now()
+        today = now_dt.strftime("%A").lower()
+        current_time = now_dt.strftime("%H:%M:%S")
+
+        matched_schedule = None
+        for sched in user.get("schedules", []):
+            if sched.get("day_of_week") == today:
+                if sched.get("start_time") <= current_time <= sched.get("end_time"):
+                    matched_schedule = sched
+                    break
+
+        if not matched_schedule:
+            reason = f"Outside schedule ({today})"
+            print(f"[OFFLINE AUTH] Denied: {reason}")
+            append_pending_log({
+                "type": "access_log",
+                "user_id": user["id"],
+                "qr_token": qr_token,
+                "action": "borrow",
+                "result": "denied",
+                "reason": f"Access Denied: Outside schedule ({today}) (Offline)",
+                "timestamp": now_str,
+            })
+            return {
+                "success": False,
+                "status": "DENIED",
+                "message": "Outside Schedule",
+                "offline": True,
+            }
+
+        s_slot = matched_schedule.get("slot_number")
+        if s_slot:
+            target_key = keys.get(str(s_slot)) or keys.get(int(s_slot))
+
+    if not target_key:
+        return {
+            "success": False,
+            "status": "DENIED",
+            "message": "No Key Available",
+            "offline": True,
+        }
+
+    if target_key.get("status") == "borrowed":
+        reason = f"Slot #{target_key.get('slot_number')} already borrowed"
+        print(f"[OFFLINE AUTH] Denied: {reason}")
+        append_pending_log({
+            "type": "access_log",
+            "user_id": user["id"],
+            "qr_token": qr_token,
+            "action": "borrow",
+            "result": "denied",
+            "reason": f"{reason} (Offline)",
+            "timestamp": now_str,
+        })
+        return {
+            "success": False,
+            "status": "DENIED",
+            "message": "Already Borrowed",
+            "offline": True,
+        }
+
+    # Grant borrow access!
+    slot = int(target_key.get("slot_number"))
+    target_key["status"] = "borrowed"
+    target_key["borrowed_by_user_id"] = user["id"]
+    save_offline_cache(cache)
+
+    append_pending_log({
+        "type": "transaction",
+        "user_id": user["id"],
+        "key_id": target_key.get("id"),
+        "slot_number": slot,
+        "action": "borrow",
+        "notes": "Borrowed via Offline QR Scan",
+        "timestamp": now_str,
+    })
+    append_pending_log({
+        "type": "access_log",
+        "user_id": user["id"],
+        "qr_token": qr_token,
+        "action": "borrow",
+        "result": "granted",
+        "reason": f"Offline borrow: Key Slot #{slot} unlocked",
+        "timestamp": now_str,
+    })
+
+    return {
+        "success": True,
+        "status": "GRANTED",
+        "action": "BORROW",
+        "slot_number": slot,
+        "key_name": target_key.get("key_name", f"Slot #{slot}"),
+        "user_name": user.get("name", "User"),
+        "message": f"Access Granted: Unlock Slot #{slot}",
+        "offline": True,
+    }
+
+
 def authenticate_qr(qr_token, slot_number=None):
     payload = {"qr_token": qr_token}
     if slot_number is not None:
         payload["slot_number"] = slot_number
     try:
         response = requests.post(API_AUTHENTICATE, json=payload, timeout=REQUEST_TIMEOUT)
-        return response.json()
+        result = response.json()
+        # Attempt syncing any pending logs since connection is verified
+        sync_pending_logs()
+        return result
     except Exception as e:
-        print(f"[API ERROR] {e}")
-        return None
+        print(f"[API ERROR / OFFLINE] {e}")
+        print("[AUTOBOX] Network unreachable. Activating Smart Offline Fallback...")
+        return authenticate_qr_offline(qr_token, slot_number)
 
 
 def get_key_statuses():
@@ -361,7 +655,8 @@ def process_scan(qr_token):
         user_name = result.get("user_name", "")
         key_name = result.get("key_name", "")
 
-        lcd_print(f"GRANTED: {action}", user_name[:16])
+        prefix = "OFFLINE" if result.get("offline") else "GRANTED"
+        lcd_print(f"{prefix}: {action}", user_name[:16])
         time.sleep(1)
         lcd_print(f"Slot #{slot}", key_name[:16])
 
@@ -391,8 +686,9 @@ def process_scan(qr_token):
                     print(f"[AUTOBOX] Relocking Slot #{slot}...")
                     GPIO.output(slot_pin, GPIO.LOW)
 
-            update_key_presence_and_leds()
+            # Refresh key statuses from server first so we know the key was legitimately borrowed
             get_key_statuses()
+            update_key_presence_and_leds()
         else:
             lcd_print("No Slot Found", "Contact Admin")
             deny_access()
@@ -441,24 +737,36 @@ def main():
     setup_lcd()
     setup_camera()
 
+    # Initial offline sync & cache refresh
+    sync_pending_logs()
+    refresh_offline_cache()
+
     keys = get_key_statuses()
     if keys:
         lcd_print("Server Connected", f"{len(keys)} Slots Active")
     else:
-        lcd_print("Server Offline", "Retry on scan")
+        cache = load_offline_cache()
+        cached_keys = cache.get("keys", {})
+        if cached_keys:
+            lcd_print("Offline Cache OK", f"{len(cached_keys)} Slots Cached")
+        else:
+            lcd_print("Server Offline", "Retry on scan")
     time.sleep(2)
     lcd_print("AUTOBOX Ready", "Scan QR Code")
 
     last_poll = time.time()
     last_ir_check = time.time()
+    last_cache_refresh = time.time()
+    last_sync_check = time.time()
 
     update_key_presence_and_leds()
 
     try:
         while True:
-            if ENABLE_IR_SENSORS and (time.time() - last_ir_check >= 3):
+            now = time.time()
+            if ENABLE_IR_SENSORS and (now - last_ir_check >= 3):
                 update_key_presence_and_leds()
-                last_ir_check = time.time()
+                last_ir_check = now
 
             qr_token = get_qr_frame()
             if qr_token:
@@ -467,9 +775,17 @@ def main():
                 update_key_presence_and_leds()
                 time.sleep(1.5)
 
-            if time.time() - last_poll >= STATUS_POLL_INTERVAL:
+            if now - last_poll >= STATUS_POLL_INTERVAL:
                 get_key_statuses()
-                last_poll = time.time()
+                last_poll = now
+
+            if now - last_sync_check >= SYNC_RETRY_INTERVAL:
+                sync_pending_logs()
+                last_sync_check = now
+
+            if now - last_cache_refresh >= CACHE_REFRESH_INTERVAL:
+                refresh_offline_cache()
+                last_cache_refresh = now
 
             time.sleep(0.05)
 
