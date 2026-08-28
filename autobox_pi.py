@@ -43,9 +43,9 @@ NO_HAND_WAIT_SECONDS = 5
 MAIN_LOCK_PIN = 23
 
 SLOT_PINS = {
-    1: 17,
+    1: 22,
     2: 27,
-    3: 22,
+    3: 17,
 }
 
 LED_GREEN_PINS = {
@@ -62,8 +62,8 @@ LED_RED_PINS = {
 
 IR_SENSOR_PINS = {
     1: 4,   # Slot 1: GPIO 4
-    2: 7,   # Slot 2: GPIO 7
-    3: 8,   # Slot 3: GPIO 8
+    2: 8,   # Slot 2: GPIO 8
+    3: 7,   # Slot 3: GPIO 7
 }
 
 ULTRASONIC_TRIG = 24
