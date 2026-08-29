@@ -37,7 +37,7 @@ REQUEST_TIMEOUT = 10
 STATUS_POLL_INTERVAL = 30
 UNLOCK_DURATION = 3
 ULTRASONIC_DISTANCE_CM = 20
-MOTOR_RUN_TIME = 2.0
+MOTOR_RUN_TIME = 1.0
 NO_HAND_WAIT_SECONDS = 5
 
 MAIN_LOCK_PIN = 23
@@ -440,7 +440,6 @@ def authenticate_qr_offline(qr_token, slot_number=None):
             "offline": True,
         }
 
-    # Check if user currently has an unreturned borrowed key (ACTION: RETURN)
     borrowed_key = None
     for s_num, k in keys.items():
         if k.get("borrowed_by_user_id") == user["id"] and k.get("status") == "borrowed":
@@ -483,7 +482,6 @@ def authenticate_qr_offline(qr_token, slot_number=None):
             "offline": True,
         }
 
-    # ACTION: BORROW KEY
     target_key = None
     if user.get("role") == "admin":
         if slot_number is not None:
@@ -494,7 +492,6 @@ def authenticate_qr_offline(qr_token, slot_number=None):
                     target_key = k
                     break
     else:
-        # Regular user: Check active schedule
         now_dt = datetime.now()
         today = now_dt.strftime("%A").lower()
         current_time = now_dt.strftime("%H:%M:%S")
@@ -556,7 +553,6 @@ def authenticate_qr_offline(qr_token, slot_number=None):
             "offline": True,
         }
 
-    # Grant borrow access!
     slot = int(target_key.get("slot_number"))
     target_key["status"] = "borrowed"
     target_key["borrowed_by_user_id"] = user["id"]
@@ -600,7 +596,6 @@ def authenticate_qr(qr_token, slot_number=None):
     try:
         response = requests.post(API_AUTHENTICATE, json=payload, timeout=REQUEST_TIMEOUT)
         result = response.json()
-        # Attempt syncing any pending logs since connection is verified
         sync_pending_logs()
         return result
     except Exception as e:
@@ -610,7 +605,7 @@ def authenticate_qr(qr_token, slot_number=None):
 
 
 def get_key_statuses():
-    global known_key_statuses
+    global known_key_statuses, previous_db_status, slot_empty_counter, reported_missing_slots
     try:
         response = requests.get(API_KEY_STATUSES, timeout=REQUEST_TIMEOUT)
         data = response.json()
@@ -620,9 +615,20 @@ def get_key_statuses():
                 slot = k.get("slot_number")
                 if slot is not None:
                     try:
-                        known_key_statuses[int(slot)] = k
+                        s_num = int(slot)
                     except (ValueError, TypeError):
-                        known_key_statuses[slot] = k
+                        s_num = slot
+
+                    new_status = k.get("status")
+                    old_status = previous_db_status.get(s_num)
+
+                    if old_status is not None and old_status != new_status:
+                        slot_empty_counter[s_num] = 0
+                        if new_status == "available":
+                            reported_missing_slots.discard(s_num)
+
+                    previous_db_status[s_num] = new_status
+                    known_key_statuses[s_num] = k
             return keys
     except Exception as e:
         print(f"[API ERROR] {e}")
@@ -631,15 +637,21 @@ def get_key_statuses():
 
 reported_missing_slots = set()
 known_key_statuses = {}
-# Debounce: count how many consecutive IR checks each slot read as empty
-# Only report missing after MISSING_DEBOUNCE_COUNT consecutive empty reads
+previous_db_status = {}
+
+slot_armed = {}
+
 MISSING_DEBOUNCE_COUNT = 3
 slot_empty_counter = {}
 
 
-def report_missing_key(slot_number):
+def report_missing_key(slot_number, reason="unauthorized_removal"):
     try:
-        response = requests.post(API_REPORT_MISSING, json={"slot_number": slot_number}, timeout=REQUEST_TIMEOUT)
+        response = requests.post(
+            API_REPORT_MISSING,
+            json={"slot_number": slot_number, "reason": reason},
+            timeout=REQUEST_TIMEOUT,
+        )
         data = response.json()
         return data.get("success", False)
     except Exception as e:
@@ -682,11 +694,6 @@ def process_scan(qr_token):
             print("[AUTOBOX] Opening motorized slider door...")
             slider_open()
 
-            # Main lock stays energized (unlocked) here on purpose.
-            # It only relocks below, after wait_no_hand_and_close() has
-            # actually closed the slider — so the door can't relock while
-            # a hand is present or before the slider finishes its cycle.
-
             print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
             wait_no_hand_and_close()
 
@@ -697,17 +704,18 @@ def process_scan(qr_token):
                     print(f"[AUTOBOX] Relocking Slot #{slot}...")
                     GPIO.output(slot_pin, GPIO.LOW)
 
-            # Immediately mark this slot as 'borrowed' locally so the IR sensor
-            # does NOT falsely report it as missing before the next DB poll.
+            action_status = "available" if action == "RETURN" else "borrowed"
             if slot in known_key_statuses:
-                known_key_statuses[slot]["status"] = "borrowed"
+                known_key_statuses[slot]["status"] = action_status
             else:
-                known_key_statuses[slot] = {"status": "borrowed", "slot_number": slot}
+                known_key_statuses[slot] = {"status": action_status, "slot_number": slot}
 
-            # Also add to reported_missing_slots guard so it's never flagged missing right after borrow
+            previous_db_status[slot] = action_status
+            if action == "BORROW":
+                slot_armed[slot] = False
             reported_missing_slots.discard(slot)
+            slot_empty_counter[slot] = 0
 
-            # Refresh key statuses from server, then sync LED/IR state
             get_key_statuses()
             update_key_presence_and_leds()
         else:
@@ -724,7 +732,7 @@ def process_scan(qr_token):
 
 
 def update_key_presence_and_leds():
-    global reported_missing_slots, known_key_statuses, slot_empty_counter
+    global reported_missing_slots, known_key_statuses, slot_empty_counter, slot_armed
     if not ENABLE_IR_SENSORS:
         return
 
@@ -735,39 +743,55 @@ def update_key_presence_and_leds():
         db_status = key_info.get("status", "unknown") if key_info else "unknown"
 
         if present:
-            # Key is back — reset debounce counter and clear any missing flags
             slot_empty_counter[slot] = 0
-            print(f"[IR] Slot #{slot} ({key_name}): KEY PRESENT  [DB: {db_status}]")
+            if slot in reported_missing_slots:
+                reported_missing_slots.discard(slot)
+
+            if db_status == "available":
+                slot_armed[slot] = True
+                print(f"[IR] Slot #{slot} ({key_name}): KEY PRESENT & ARMED  [DB: {db_status}]")
+            else:
+                print(f"[IR] Slot #{slot} ({key_name}): KEY PRESENT  [DB: {db_status}]")
+
             if ENABLE_LEDS and slot in LED_GREEN_PINS:
                 GPIO.output(LED_GREEN_PINS[slot], GPIO.HIGH)
             if ENABLE_LEDS and slot in LED_RED_PINS:
                 GPIO.output(LED_RED_PINS[slot], GPIO.LOW)
 
-            if slot in reported_missing_slots:
-                reported_missing_slots.discard(slot)
         else:
             if ENABLE_LEDS and slot in LED_GREEN_PINS:
                 GPIO.output(LED_GREEN_PINS[slot], GPIO.LOW)
             if ENABLE_LEDS and slot in LED_RED_PINS:
                 GPIO.output(LED_RED_PINS[slot], GPIO.HIGH)
 
-            # Increment debounce counter — only report missing after MISSING_DEBOUNCE_COUNT
-            # consecutive empty readings to avoid false triggers from vibration/noise
-            slot_empty_counter[slot] = slot_empty_counter.get(slot, 0) + 1
-            count = slot_empty_counter[slot]
-            print(f"[IR] Slot #{slot} ({key_name}): EMPTY  [DB: {db_status}]  (empty count: {count}/{MISSING_DEBOUNCE_COUNT})")
+            if db_status == "borrowed":
+                slot_armed[slot] = False
+                slot_empty_counter[slot] = 0
+                print(f"[IR] Slot #{slot} ({key_name}): EMPTY (Checked Out)  [DB: {db_status}]")
 
-            if (
-                key_info
-                and db_status == "available"
-                and slot not in reported_missing_slots
-                and count >= MISSING_DEBOUNCE_COUNT
-            ):
-                print(f"[AUTOBOX ALERT] Key Slot #{slot} is physically MISSING! Reporting to Laravel...")
-                if report_missing_key(slot):
-                    reported_missing_slots.add(slot)
-                    known_key_statuses[slot]["status"] = "missing"
-                    print(f"[AUTOBOX ALERT] Slot #{slot} successfully flagged as MISSING in Laravel database.")
+            elif db_status == "available":
+                is_armed = slot_armed.get(slot, False)
+
+                if is_armed:
+                    slot_empty_counter[slot] = slot_empty_counter.get(slot, 0) + 1
+                    count = slot_empty_counter[slot]
+                    print(f"[IR ALERT] Slot #{slot} ({key_name}): UNEXPECTED EMPTY! Anti-theft triggered (count: {count}/{MISSING_DEBOUNCE_COUNT})")
+
+                    if slot not in reported_missing_slots and count >= MISSING_DEBOUNCE_COUNT:
+                        print(f"[AUTOBOX ALERT] Key Slot #{slot} was REMOVED without authorization! Reporting to Laravel...")
+                        if report_missing_key(slot):
+                            reported_missing_slots.add(slot)
+                            slot_armed[slot] = False
+                            if slot in known_key_statuses:
+                                known_key_statuses[slot]["status"] = "missing"
+                            print(f"[AUTOBOX ALERT] Slot #{slot} successfully flagged as MISSING in Laravel database.")
+                else:
+                    slot_empty_counter[slot] = 0
+                    print(f"[IR] Slot #{slot} ({key_name}): EMPTY (Awaiting Key Placement)  [DB: {db_status}]")
+
+            else:
+                slot_armed[slot] = False
+                print(f"[IR] Slot #{slot} ({key_name}): EMPTY  [DB: {db_status}]")
 
 
 def main():
@@ -775,7 +799,6 @@ def main():
     setup_lcd()
     setup_camera()
 
-    # Initial offline sync & cache refresh
     sync_pending_logs()
     refresh_offline_cache()
 
@@ -803,7 +826,6 @@ def main():
         while True:
             now = time.time()
             if ENABLE_IR_SENSORS and (now - last_ir_check >= 3):
-                # Always refresh DB statuses first so IR sensor compares against live data
                 get_key_statuses()
                 update_key_presence_and_leds()
                 last_ir_check = now
