@@ -122,25 +122,28 @@ class AuthQrController extends Controller
         $key = null;
 
         if ($user->role === 'admin') {
-            $reason = "Access Denied: Admins cannot borrow keys.";
             AccessLog::create([
                 'user_id'    => $user->id,
                 'qr_token'   => $qrToken,
-                'action'     => 'borrow',
-                'result'     => 'denied',
-                'reason'     => $reason,
+                'action'     => 'admin_access',
+                'result'     => 'granted',
+                'reason'     => 'Admin Access: Main lockbox door opened',
                 'ip_address' => $ip,
             ]);
 
-            $this->safeBroadcast(function () use ($user, $reason) {
-                AccessLogged::dispatch($user->name, 'borrow', 'denied', $reason, null, null);
+            $this->safeBroadcast(function () use ($user) {
+                AccessLogged::dispatch($user->name, 'admin_access', 'granted', 'Admin Access: Door opened', null, null);
             });
 
             return response()->json([
-                'success' => false,
-                'status'  => 'DENIED',
-                'message' => $reason,
-            ], 403);
+                'success'     => true,
+                'status'      => 'GRANTED',
+                'action'      => 'ADMIN_DOOR_OPEN',
+                'slot_number' => null,
+                'key_name'    => 'Lock Box Main Door',
+                'user_name'   => $user->name,
+                'message'     => 'Admin Access: Opening Door',
+            ]);
         } else {
             $schedule = Schedule::where('user_id', $user->id)
                 ->where('day_of_week', $today)
