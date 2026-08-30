@@ -698,11 +698,13 @@
             if action == "ADMIN_DOOR_OPEN" or slot is None:
                 lcd_print("ADMIN ACCESS", user_name[:16])
                 time.sleep(1)
-                lcd_print("Opening Door...", "Master Access")
+                lcd_print("Unlocking Slots", "Opening Door...")
 
                 if ENABLE_SOLENOIDS:
-                    print(f"[AUTOBOX] Unlocking Main Door for Admin ({user_name})...")
+                    print(f"[AUTOBOX] Unlocking Main Door & All Slot Solenoids for Admin ({user_name})...")
                     GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
+                    for s_num, pin in SLOT_PINS.items():
+                        GPIO.output(pin, GPIO.HIGH)
 
                 print("[AUTOBOX] Opening motorized slider door...")
                 slider_open()
@@ -712,6 +714,8 @@
 
                 if ENABLE_SOLENOIDS:
                     GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+                    for s_num, pin in SLOT_PINS.items():
+                        GPIO.output(pin, GPIO.LOW)
 
                 get_key_statuses()
                 update_key_presence_and_leds()
