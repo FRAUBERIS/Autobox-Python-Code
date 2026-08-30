@@ -484,13 +484,23 @@ def authenticate_qr_offline(qr_token, slot_number=None):
 
     target_key = None
     if user.get("role") == "admin":
-        if slot_number is not None:
-            target_key = keys.get(str(slot_number)) or keys.get(int(slot_number))
-        else:
-            for s_num, k in keys.items():
-                if k.get("status") == "available":
-                    target_key = k
-                    break
+        reason = "Admins cannot borrow keys"
+        print(f"[OFFLINE AUTH] Denied: {reason}")
+        append_pending_log({
+            "type": "access_log",
+            "user_id": user["id"],
+            "qr_token": qr_token,
+            "action": "borrow",
+            "result": "denied",
+            "reason": f"Access Denied: {reason} (Offline)",
+            "timestamp": now_str,
+        })
+        return {
+            "success": False,
+            "status": "DENIED",
+            "message": "Admins Cannot Borrow",
+            "offline": True,
+        }
     else:
         now_dt = datetime.now()
         today = now_dt.strftime("%A").lower()
