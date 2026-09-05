@@ -234,26 +234,47 @@ def get_distance_cm():
 
     readings = []
     for _ in range(3):
+        # Settle sensor and ensure ECHO is low before pulsing
         GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
-        time.sleep(0.002)
+        pre_wait = time.time() + 0.01
+        while GPIO.input(ULTRASONIC_ECHO) == 1:
+            if time.time() > pre_wait:
+                break
+
+        # Send 10µs trigger pulse
         GPIO.output(ULTRASONIC_TRIG, GPIO.HIGH)
         time.sleep(0.00001)
         GPIO.output(ULTRASONIC_TRIG, GPIO.LOW)
 
+        # Wait for echo pulse start
         pulse_start = time.time()
-        pulse_end = time.time()
-        timeout = time.time() + 0.03
-
+        timeout = pulse_start + 0.03
+        echo_started = False
         while GPIO.input(ULTRASONIC_ECHO) == 0:
             pulse_start = time.time()
             if pulse_start > timeout:
                 break
+        else:
+            echo_started = True
 
-        timeout = time.time() + 0.03
+        if not echo_started:
+            time.sleep(0.02)
+            continue
+
+        # Wait for echo pulse end
+        pulse_end = time.time()
+        timeout = pulse_end + 0.03
+        echo_ended = False
         while GPIO.input(ULTRASONIC_ECHO) == 1:
             pulse_end = time.time()
             if pulse_end > timeout:
                 break
+        else:
+            echo_ended = True
+
+        if not echo_ended:
+            time.sleep(0.02)
+            continue
 
         duration = pulse_end - pulse_start
         dist = round((duration * 34300) / 2, 1)
@@ -261,15 +282,24 @@ def get_distance_cm():
         if 2.0 <= dist <= 300.0:
             readings.append(dist)
 
+        time.sleep(0.03)  # Allow ultrasonic sound reflections to dissipate
+
     if len(readings) > 0:
         readings.sort()
         return readings[len(readings) // 2]
     return 999
 
 
-def person_detected():
-    distance = get_distance_cm()
-    return distance <= ULTRASONIC_DISTANCE_CM
+def person_detected(required_hits=2):
+    hits = 0
+    for _ in range(required_hits):
+        distance = get_distance_cm()
+        if distance <= ULTRASONIC_DISTANCE_CM:
+            hits += 1
+        else:
+            return False
+        time.sleep(0.04)
+    return hits >= required_hits
 
 
 def is_key_present(slot_number):
@@ -714,6 +744,11 @@ def process_scan(qr_token):
                 print("[AUTOBOX] Opening motorized slider door...")
                 slider_open()
 
+                # Release MAIN_LOCK_PIN immediately: door is already open,
+                # so keeping the main lock energized wastes power and induces noise on the sensor.
+                if ENABLE_SOLENOIDS:
+                    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+
                 print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
                 wait_no_hand_and_close()
 
@@ -727,25 +762,31 @@ def process_scan(qr_token):
             get_key_statuses()
             update_key_presence_and_leds()
         elif slot:
-            if ENABLE_SOLENOIDS:
-                print(f"[AUTOBOX] Unlocking Main Door and Slot #{slot}...")
-                GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
-                slot_pin = SLOT_PINS.get(slot)
-                if slot_pin:
-                    GPIO.output(slot_pin, GPIO.HIGH)
+            try:
+                if ENABLE_SOLENOIDS:
+                    print(f"[AUTOBOX] Unlocking Main Door and Slot #{slot}...")
+                    GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
+                    slot_pin = SLOT_PINS.get(slot)
+                    if slot_pin:
+                        GPIO.output(slot_pin, GPIO.HIGH)
 
-            print("[AUTOBOX] Opening motorized slider door...")
-            slider_open()
+                print("[AUTOBOX] Opening motorized slider door...")
+                slider_open()
 
-            print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
-            wait_no_hand_and_close()
+                # Release MAIN_LOCK_PIN immediately: door is already open
+                if ENABLE_SOLENOIDS:
+                    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
 
-            if ENABLE_SOLENOIDS:
-                GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
-                slot_pin = SLOT_PINS.get(slot)
-                if slot_pin:
-                    print(f"[AUTOBOX] Relocking Slot #{slot}...")
-                    GPIO.output(slot_pin, GPIO.LOW)
+                print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
+                wait_no_hand_and_close()
+
+            finally:
+                if ENABLE_SOLENOIDS:
+                    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+                    slot_pin = SLOT_PINS.get(slot)
+                    if slot_pin:
+                        print(f"[AUTOBOX] Relocking Slot #{slot}...")
+                        GPIO.output(slot_pin, GPIO.LOW)
 
             action_status = "available" if action == "RETURN" else "borrowed"
             if slot in known_key_statuses:
