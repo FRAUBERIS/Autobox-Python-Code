@@ -744,11 +744,6 @@ def process_scan(qr_token):
                 print("[AUTOBOX] Opening motorized slider door...")
                 slider_open()
 
-                # Release MAIN_LOCK_PIN immediately: door is already open,
-                # so keeping the main lock energized wastes power and induces noise on the sensor.
-                if ENABLE_SOLENOIDS:
-                    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
-
                 print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
                 wait_no_hand_and_close()
 
@@ -772,10 +767,6 @@ def process_scan(qr_token):
 
                 print("[AUTOBOX] Opening motorized slider door...")
                 slider_open()
-
-                # Release MAIN_LOCK_PIN immediately: door is already open
-                if ENABLE_SOLENOIDS:
-                    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
 
                 print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
                 wait_no_hand_and_close()
