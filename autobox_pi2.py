@@ -19,7 +19,7 @@ ENABLE_MOTOR = True
 
 KEY_PRESENT_STATE = GPIO.LOW
 
-API_BASE_URL = "http://192.168.11.130:8000"
+API_BASE_URL = "https://autoboxs.site"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 API_KEY_STATUSES = f"{API_BASE_URL}/api/keys"
 API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
