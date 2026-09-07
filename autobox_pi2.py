@@ -26,6 +26,13 @@ API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
 API_OFFLINE_CACHE = f"{API_BASE_URL}/api/offline-cache"
 API_SYNC_LOGS = f"{API_BASE_URL}/api/sync-offline-logs"
 
+API_KEY = os.getenv("AUTOBOX_HARDWARE_KEY", "autobox-sec-hw-token-ccsict-2026")
+API_HEADERS = {
+    "X-AUTOBOX-API-KEY": API_KEY,
+    "Accept": "application/json",
+}
+
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OFFLINE_CACHE_FILE = os.path.join(SCRIPT_DIR, "offline_cache.json")
 PENDING_SYNC_FILE = os.path.join(SCRIPT_DIR, "pending_sync_logs.json")
@@ -398,7 +405,7 @@ def clear_pending_logs():
 def refresh_offline_cache():
     """Fetch latest active users, schedules, and keys from Laravel and cache locally."""
     try:
-        response = requests.get(API_OFFLINE_CACHE, timeout=REQUEST_TIMEOUT)
+        response = requests.get(API_OFFLINE_CACHE, headers=API_HEADERS, timeout=REQUEST_TIMEOUT)
         data = response.json()
         if data.get("success"):
             save_offline_cache(data)
@@ -419,7 +426,7 @@ def sync_pending_logs():
 
     print(f"[SYNC] Attempting to upload {len(pending)} queued offline event(s) to Laravel...")
     try:
-        response = requests.post(API_SYNC_LOGS, json={"logs": pending}, timeout=REQUEST_TIMEOUT)
+        response = requests.post(API_SYNC_LOGS, json={"logs": pending}, headers=API_HEADERS, timeout=REQUEST_TIMEOUT)
         data = response.json()
         if data.get("success"):
             synced = data.get("synced_count", len(pending))
@@ -640,7 +647,7 @@ def authenticate_qr(qr_token, slot_number=None):
     if slot_number is not None:
         payload["slot_number"] = slot_number
     try:
-        response = requests.post(API_AUTHENTICATE, json=payload, timeout=REQUEST_TIMEOUT)
+        response = requests.post(API_AUTHENTICATE, json=payload, headers=API_HEADERS, timeout=REQUEST_TIMEOUT)
         result = response.json()
         sync_pending_logs()
         return result
@@ -653,7 +660,7 @@ def authenticate_qr(qr_token, slot_number=None):
 def get_key_statuses():
     global known_key_statuses, previous_db_status, slot_empty_counter, reported_missing_slots
     try:
-        response = requests.get(API_KEY_STATUSES, timeout=REQUEST_TIMEOUT)
+        response = requests.get(API_KEY_STATUSES, headers=API_HEADERS, timeout=REQUEST_TIMEOUT)
         data = response.json()
         if data.get("success"):
             keys = data.get("keys", [])
@@ -696,6 +703,7 @@ def report_missing_key(slot_number, reason="unauthorized_removal"):
         response = requests.post(
             API_REPORT_MISSING,
             json={"slot_number": slot_number, "reason": reason},
+            headers=API_HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
         data = response.json()
