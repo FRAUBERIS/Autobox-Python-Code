@@ -1,6 +1,8 @@
 import os
 import time
 import json
+import hmac
+import hashlib
 from datetime import datetime
 import requests
 import RPi.GPIO as GPIO
@@ -19,7 +21,12 @@ ENABLE_MOTOR = True
 
 KEY_PRESENT_STATE = GPIO.LOW
 
-API_BASE_URL = "https://autoboxs.site"
+RELAY_ACTIVE_LOW = True
+RELAY_ON = GPIO.LOW if RELAY_ACTIVE_LOW else GPIO.HIGH
+RELAY_OFF = GPIO.HIGH if RELAY_ACTIVE_LOW else GPIO.LOW
+SOLENOID_PULSE_DURATION = 1.5
+
+API_BASE_URL = "http://192.168.11.130:8000"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
 API_KEY_STATUSES = f"{API_BASE_URL}/api/keys"
 API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
@@ -27,6 +34,28 @@ API_OFFLINE_CACHE = f"{API_BASE_URL}/api/offline-cache"
 API_SYNC_LOGS = f"{API_BASE_URL}/api/sync-offline-logs"
 
 API_KEY = os.getenv("AUTOBOX_HARDWARE_KEY", "autobox-sec-hw-token-ccsict-2026")
+
+def build_auth_headers(payload_dict=None):
+    timestamp = str(int(time.time()))
+    if payload_dict is not None:
+        body_str = json.dumps(payload_dict, separators=(',', ':'))
+    else:
+        body_str = ""
+
+    data_to_sign = f"{timestamp}:{body_str}".encode('utf-8')
+    signature = hmac.new(API_KEY.encode('utf-8'), data_to_sign, hashlib.sha256).hexdigest()
+
+    headers = {
+        "X-AUTOBOX-TIMESTAMP": timestamp,
+        "X-AUTOBOX-SIGNATURE": signature,
+        "X-AUTOBOX-API-KEY": API_KEY,
+        "Accept": "application/json",
+    }
+    if payload_dict is not None:
+        headers["Content-Type"] = "application/json"
+
+    return headers, body_str
+
 API_HEADERS = {
     "X-AUTOBOX-API-KEY": API_KEY,
     "Accept": "application/json",
@@ -118,11 +147,11 @@ def setup_gpio():
     GPIO.setwarnings(False)
 
     if ENABLE_SOLENOIDS:
-        GPIO.setup(MAIN_LOCK_PIN, GPIO.OUT)
-        GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+        GPIO.setup(MAIN_LOCK_PIN, GPIO.OUT, initial=RELAY_OFF)
+        GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
         for slot, pin in SLOT_PINS.items():
-            GPIO.setup(pin, GPIO.OUT)
-            GPIO.output(pin, GPIO.LOW)
+            GPIO.setup(pin, GPIO.OUT, initial=RELAY_OFF)
+            GPIO.output(pin, RELAY_OFF)
 
     if ENABLE_LEDS:
         for slot, pin in LED_GREEN_PINS.items():
@@ -176,51 +205,66 @@ def slider_close():
 
 def wait_no_hand_and_close():
     if not ENABLE_MOTOR:
+        if ENABLE_SOLENOIDS:
+            GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
         return
+
     no_hand_start = None
+    HAND_CLEAR_CONFIRM_SECONDS = 1.5
+
     while True:
         if person_detected():
             no_hand_start = None
             lcd_print("Hand Detected", "Waiting...")
-            time.sleep(0.3)
+            time.sleep(0.2)
         else:
             if no_hand_start is None:
                 no_hand_start = time.time()
-            elapsed = time.time() - no_hand_start
-            remaining = max(0, int(NO_HAND_WAIT_SECONDS - elapsed))
-            lcd_print("No Hand Detected", f"Closing in {remaining}s")
-            if elapsed >= NO_HAND_WAIT_SECONDS:
+            if (time.time() - no_hand_start) >= HAND_CLEAR_CONFIRM_SECONDS:
                 break
-            time.sleep(0.2)
-    lcd_print("Closing Door...", "Please clear")
+            time.sleep(0.1)
+
+    lcd_print("Hand Cleared", "Closing Door...")
+    print("[AUTOBOX] Hand cleared. Closing motorized slider door...")
+
+    if ENABLE_SOLENOIDS:
+        GPIO.output(MAIN_LOCK_PIN, RELAY_ON)
+
     slider_close()
+
+    if ENABLE_SOLENOIDS:
+        GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
+        print("[AUTOBOX] DC motor finished closing. Main door solenoid locked.")
+
+    lcd_print("Door Closed", "Main Lock Locked")
+    time.sleep(0.8)
 
 
 def unlock_main_door():
     if ENABLE_SOLENOIDS:
-        GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
-        time.sleep(UNLOCK_DURATION)
-        GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+        try:
+            GPIO.output(MAIN_LOCK_PIN, RELAY_ON)
+            time.sleep(SOLENOID_PULSE_DURATION)
+        finally:
+            GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
 
 
 def unlock_slot(slot_number):
-    if ENABLE_SOLENOIDS:
-        pin = SLOT_PINS.get(slot_number)
-        if pin:
-            GPIO.output(pin, GPIO.HIGH)
-
+    pin = SLOT_PINS.get(slot_number)
     if ENABLE_LEDS:
         if slot_number in LED_GREEN_PINS:
             GPIO.output(LED_GREEN_PINS[slot_number], GPIO.HIGH)
         if slot_number in LED_RED_PINS:
             GPIO.output(LED_RED_PINS[slot_number], GPIO.LOW)
 
-    time.sleep(UNLOCK_DURATION)
-
-    if ENABLE_SOLENOIDS:
-        pin = SLOT_PINS.get(slot_number)
-        if pin:
-            GPIO.output(pin, GPIO.LOW)
+    if ENABLE_SOLENOIDS and pin:
+        try:
+            GPIO.output(pin, RELAY_ON)
+            time.sleep(SOLENOID_PULSE_DURATION)
+        finally:
+            GPIO.output(pin, RELAY_OFF)
+    else:
+        time.sleep(SOLENOID_PULSE_DURATION)
 
 
 def deny_access():
@@ -405,7 +449,8 @@ def clear_pending_logs():
 def refresh_offline_cache():
     """Fetch latest active users, schedules, and keys from Laravel and cache locally."""
     try:
-        response = requests.get(API_OFFLINE_CACHE, headers=API_HEADERS, timeout=REQUEST_TIMEOUT)
+        headers, _ = build_auth_headers()
+        response = requests.get(API_OFFLINE_CACHE, headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
         if data.get("success"):
             save_offline_cache(data)
@@ -426,7 +471,9 @@ def sync_pending_logs():
 
     print(f"[SYNC] Attempting to upload {len(pending)} queued offline event(s) to Laravel...")
     try:
-        response = requests.post(API_SYNC_LOGS, json={"logs": pending}, headers=API_HEADERS, timeout=REQUEST_TIMEOUT)
+        payload = {"logs": pending}
+        headers, body_data = build_auth_headers(payload)
+        response = requests.post(API_SYNC_LOGS, data=body_data, headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
         if data.get("success"):
             synced = data.get("synced_count", len(pending))
@@ -647,7 +694,8 @@ def authenticate_qr(qr_token, slot_number=None):
     if slot_number is not None:
         payload["slot_number"] = slot_number
     try:
-        response = requests.post(API_AUTHENTICATE, json=payload, headers=API_HEADERS, timeout=REQUEST_TIMEOUT)
+        headers, body_data = build_auth_headers(payload)
+        response = requests.post(API_AUTHENTICATE, data=body_data, headers=headers, timeout=REQUEST_TIMEOUT)
         result = response.json()
         sync_pending_logs()
         return result
@@ -660,7 +708,8 @@ def authenticate_qr(qr_token, slot_number=None):
 def get_key_statuses():
     global known_key_statuses, previous_db_status, slot_empty_counter, reported_missing_slots
     try:
-        response = requests.get(API_KEY_STATUSES, headers=API_HEADERS, timeout=REQUEST_TIMEOUT)
+        headers, _ = build_auth_headers()
+        response = requests.get(API_KEY_STATUSES, headers=headers, timeout=REQUEST_TIMEOUT)
         data = response.json()
         if data.get("success"):
             keys = data.get("keys", [])
@@ -700,10 +749,12 @@ slot_empty_counter = {}
 
 def report_missing_key(slot_number, reason="unauthorized_removal"):
     try:
+        payload = {"slot_number": slot_number, "reason": reason}
+        headers, body_data = build_auth_headers(payload)
         response = requests.post(
             API_REPORT_MISSING,
-            json={"slot_number": slot_number, "reason": reason},
-            headers=API_HEADERS,
+            data=body_data,
+            headers=headers,
             timeout=REQUEST_TIMEOUT,
         )
         data = response.json()
@@ -745,47 +796,114 @@ def process_scan(qr_token):
             try:
                 if ENABLE_SOLENOIDS:
                     print(f"[AUTOBOX] Unlocking Main Door & All Slot Solenoids for Admin ({user_name})...")
-                    GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
+                    GPIO.output(MAIN_LOCK_PIN, RELAY_ON)
                     for s_num, pin in SLOT_PINS.items():
-                        GPIO.output(pin, GPIO.HIGH)
+                        GPIO.output(pin, RELAY_ON)
 
                 print("[AUTOBOX] Opening motorized slider door...")
                 slider_open()
 
-                print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
+                if ENABLE_SOLENOIDS:
+                    GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
+                    for s_num, pin in SLOT_PINS.items():
+                        GPIO.output(pin, RELAY_OFF)
+                    print("[AUTOBOX] Solenoids de-energized (thermal protection).")
+
+                print("[AUTOBOX] Waiting for hand clearance...")
                 wait_no_hand_and_close()
 
             finally:
                 if ENABLE_SOLENOIDS:
-                    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
+                    GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
                     for s_num, pin in SLOT_PINS.items():
-                        GPIO.output(pin, GPIO.LOW)
+                        GPIO.output(pin, RELAY_OFF)
                     print("[AUTOBOX] All solenoids relocked.")
 
             get_key_statuses()
             update_key_presence_and_leds()
         elif slot:
+            slot_pin = SLOT_PINS.get(slot)
             try:
                 if ENABLE_SOLENOIDS:
                     print(f"[AUTOBOX] Unlocking Main Door and Slot #{slot}...")
-                    GPIO.output(MAIN_LOCK_PIN, GPIO.HIGH)
-                    slot_pin = SLOT_PINS.get(slot)
+                    GPIO.output(MAIN_LOCK_PIN, RELAY_ON)
                     if slot_pin:
-                        GPIO.output(slot_pin, GPIO.HIGH)
+                        GPIO.output(slot_pin, RELAY_ON)
 
                 print("[AUTOBOX] Opening motorized slider door...")
                 slider_open()
 
-                print("[AUTOBOX] Waiting for user hand removal (5s safety timer)...")
+                if ENABLE_SOLENOIDS:
+                    GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
+
+                if action == "RETURN":
+                    print(f"[AUTOBOX] Slot #{slot} open for return. Waiting for key insertion into IR slot...")
+                    lcd_print(f"Return Slot #{slot}", "Insert Key...")
+
+                    max_return_wait = 30.0
+                    start_wait = time.time()
+                    returned = False
+                    key_detected_start = None
+                    KEY_CONFIRM_SECONDS = 2.0
+
+                    while (time.time() - start_wait) < max_return_wait:
+                        if is_key_present(slot):
+                            if key_detected_start is None:
+                                key_detected_start = time.time()
+                                lcd_print(f"Slot #{slot}", "Verifying Key...")
+                            elif (time.time() - key_detected_start) >= KEY_CONFIRM_SECONDS:
+                                returned = True
+                                break
+                        else:
+                            if key_detected_start is not None:
+                                lcd_print(f"Return Slot #{slot}", "Insert Key...")
+                            key_detected_start = None
+
+                        time.sleep(0.05)
+
+                    if ENABLE_SOLENOIDS and slot_pin:
+                        GPIO.output(slot_pin, RELAY_OFF)
+                    if returned:
+                        lcd_print("Key Inserted!", f"Slot #{slot} Locked")
+                        time.sleep(0.8)
+                    else:
+                        lcd_print("Return Timeout", f"Slot #{slot} Relocked")
+                        time.sleep(0.8)
+
+                elif action == "BORROW":
+                    print(f"[AUTOBOX] Slot #{slot} unlocked for borrow. Waiting for key removal...")
+                    lcd_print(f"Borrow Slot #{slot}", "Take Key...")
+
+                    max_borrow_wait = 15.0
+                    start_wait = time.time()
+                    taken = False
+
+                    while (time.time() - start_wait) < max_borrow_wait:
+                        if not is_key_present(slot):
+                            taken = True
+                            print(f"[AUTOBOX] Key removed from Slot #{slot}!")
+                            break
+                        time.sleep(0.05)
+
+                    if ENABLE_SOLENOIDS and slot_pin:
+                        GPIO.output(slot_pin, RELAY_OFF)
+                        print(f"[AUTOBOX] Slot #{slot} solenoid turned OFF (pushed).")
+
+                    if taken:
+                        lcd_print("Key Taken!", "Please clear hand")
+                        time.sleep(0.8)
+                else:
+                    if ENABLE_SOLENOIDS and slot_pin:
+                        GPIO.output(slot_pin, RELAY_OFF)
+
+                print("[AUTOBOX] Waiting for hand clearance...")
                 wait_no_hand_and_close()
 
             finally:
                 if ENABLE_SOLENOIDS:
-                    GPIO.output(MAIN_LOCK_PIN, GPIO.LOW)
-                    slot_pin = SLOT_PINS.get(slot)
+                    GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
                     if slot_pin:
-                        print(f"[AUTOBOX] Relocking Slot #{slot}...")
-                        GPIO.output(slot_pin, GPIO.LOW)
+                        GPIO.output(slot_pin, RELAY_OFF)
 
             action_status = "available" if action == "RETURN" else "borrowed"
             if slot in known_key_statuses:
