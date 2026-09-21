@@ -804,10 +804,9 @@ def process_scan(qr_token):
                 slider_open()
 
                 if ENABLE_SOLENOIDS:
-                    GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
                     for s_num, pin in SLOT_PINS.items():
                         GPIO.output(pin, RELAY_OFF)
-                    print("[AUTOBOX] Solenoids de-energized (thermal protection).")
+                    print("[AUTOBOX] Slot solenoids de-energized.")
 
                 print("[AUTOBOX] Waiting for hand clearance...")
                 wait_no_hand_and_close()
@@ -832,9 +831,6 @@ def process_scan(qr_token):
 
                 print("[AUTOBOX] Opening motorized slider door...")
                 slider_open()
-
-                if ENABLE_SOLENOIDS:
-                    GPIO.output(MAIN_LOCK_PIN, RELAY_OFF)
 
                 if action == "RETURN":
                     print(f"[AUTOBOX] Slot #{slot} open for return. Waiting for key insertion into IR slot...")
