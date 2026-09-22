@@ -79,35 +79,35 @@ NO_HAND_WAIT_SECONDS = 5
 MAIN_LOCK_PIN = 23
 
 SLOT_PINS = {
-    1: 17,  
-    2: 27,  
-    3: 22,  
+    1: 17,  # Slot 1 Solenoid: GPIO 17 (Pin 11) - Relay IN1
+    2: 27,  # Slot 2 Solenoid: GPIO 27 (Pin 13) - Relay IN2
+    3: 22,  # Slot 3 Solenoid: GPIO 22 (Pin 15) - Relay IN3
 }
 
 LED_GREEN_PINS = {
-    1: 5,
-    2: 6,
-    3: 13,
+    1: 5,   # Green LED Slot 1: GPIO 5 (Pin 29)
+    2: 6,   # Green LED Slot 2: GPIO 6 (Pin 31)
+    3: 13,  # Green LED Slot 3: GPIO 13 (Pin 33)
 }
 
 LED_RED_PINS = {
-    1: 12,
-    2: 16,
-    3: 20,
+    1: 12,  # Red LED Slot 1: GPIO 12 (Pin 32)
+    2: 16,  # Red LED Slot 2: GPIO 16 (Pin 36)
+    3: 20,  # Red LED Slot 3: GPIO 20 (Pin 38)
 }
 
 IR_SENSOR_PINS = {
-    1: 4,   
-    2: 8,   
-    3: 7,   
+    1: 4,   # IR Sensor Slot 1: GPIO 4 (Pin 7)
+    2: 8,   # IR Sensor Slot 2: GPIO 8 (Pin 24)
+    3: 7,   # IR Sensor Slot 3: GPIO 7 (Pin 26)
 }
 
-ULTRASONIC_TRIG = 24
-ULTRASONIC_ECHO = 25
+ULTRASONIC_TRIG = 24  # Pin 18
+ULTRASONIC_ECHO = 25  # Pin 22
 
-MOTOR_IN1 = 19
-MOTOR_IN2 = 26
-MOTOR_ENA = 21
+MOTOR_IN1 = 19        # Pin 35
+MOTOR_IN2 = 26        # Pin 37
+MOTOR_ENA = 21        # Pin 40
 
 LCD_I2C_ADDRESS = 0x27
 LCD_I2C_PORT = 1
@@ -836,11 +836,11 @@ def process_scan(qr_token):
                     print(f"[AUTOBOX] Slot #{slot} open for return. Waiting for key insertion into IR slot...")
                     lcd_print(f"Return Slot #{slot}", "Insert Key...")
 
-                    max_return_wait = 30.0
+                    max_return_wait = 20.0
                     start_wait = time.time()
                     returned = False
                     key_detected_start = None
-                    KEY_CONFIRM_SECONDS = 2.0
+                    KEY_CONFIRM_SECONDS = 0.5
 
                     while (time.time() - start_wait) < max_return_wait:
                         if is_key_present(slot):
@@ -1029,8 +1029,7 @@ def main():
     try:
         while True:
             now = time.time()
-            if ENABLE_IR_SENSORS and (now - last_ir_check >= 3):
-                get_key_statuses()
+            if ENABLE_IR_SENSORS and (now - last_ir_check >= 0.5):
                 update_key_presence_and_leds()
                 last_ir_check = now
 
