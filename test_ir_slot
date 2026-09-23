@@ -1,0 +1,150 @@
+import time
+import sys
+
+try:
+    import RPi.GPIO as GPIO
+except ImportError:
+    print("[ERROR] RPi.GPIO is only available on Raspberry Pi.")
+    sys.exit(1)
+
+IR_SLOTS = {
+    1: {"name": "Slot 1", "gpio": 4},
+    2: {"name": "Slot 2", "gpio": 8},
+    3: {"name": "Slot 3", "gpio": 7},
+}
+
+def setup():
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+    for slot, info in IR_SLOTS.items():
+        GPIO.setup(info["gpio"], GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+def test_single_slot(slot_num):
+    info = IR_SLOTS.get(slot_num)
+    if not info:
+        print(f"Invalid slot {slot_num}")
+        return
+
+    pin = info["gpio"]
+    print("\n" + "=" * 50)
+    print(f"TESTING {info['name'].upper()} IR SENSOR")
+    print("=" * 50)
+    print(f"GPIO: {pin}")
+    print("LOW (0)  = OBJECT DETECTED")
+    print("HIGH (1) = EMPTY")
+    print("\nPress Ctrl+C to return to menu.\n")
+
+    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    last_state = None
+
+    try:
+        while True:
+            val = GPIO.input(pin)
+            detected = (val == GPIO.LOW)
+
+            if detected != last_state:
+                last_state = detected
+                ts = time.strftime("%H:%M:%S")
+                if detected:
+                    print(f"[{ts}] OBJECT DETECTED (GPIO {pin} = LOW / 0)")
+                else:
+                    print(f"[{ts}] EMPTY / NO OBJECT (GPIO {pin} = HIGH / 1)")
+
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print(f"\nStopped testing {info['name']}.")
+
+def test_slot3_pin_check():
+    print("\n" + "=" * 50)
+    print("SLOT 3 PIN CHECK (GPIO 7 vs GPIO 8)")
+    print("=" * 50)
+    print("Press Ctrl+C to return to menu.\n")
+
+    GPIO.setup(7, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(8, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    last_v7 = None
+    last_v8 = None
+
+    try:
+        while True:
+            v7 = GPIO.input(7)
+            v8 = GPIO.input(8)
+
+            if v7 != last_v7 or v8 != last_v8:
+                last_v7 = v7
+                last_v8 = v8
+                ts = time.strftime("%H:%M:%S")
+
+                status7 = "DETECTED" if v7 == GPIO.LOW else "EMPTY"
+                status8 = "DETECTED" if v8 == GPIO.LOW else "EMPTY"
+
+                active = ""
+                if v7 == GPIO.LOW and v8 != GPIO.LOW:
+                    active = "--> TRIGGERED ON GPIO 7"
+                elif v8 == GPIO.LOW and v7 != GPIO.LOW:
+                    active = "--> TRIGGERED ON GPIO 8"
+                elif v7 == GPIO.LOW and v8 == GPIO.LOW:
+                    active = "--> BOTH TRIGGERED"
+                else:
+                    active = "--> NO OBJECT"
+
+                print(f"[{ts}] GPIO 7: {status7:<10} | GPIO 8: {status8:<10} {active}")
+
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print("\nSlot 3 pin check stopped.")
+
+def test_all_slots_live():
+    print("\n" + "=" * 50)
+    print("LIVE IR SENSOR MONITOR (SLOTS 1, 2, 3)")
+    print("=" * 50)
+    print("Press Ctrl+C to return to menu.\n")
+
+    try:
+        while True:
+            readings = []
+            for slot, info in IR_SLOTS.items():
+                val = GPIO.input(info["gpio"])
+                status = "DETECTED" if val == GPIO.LOW else "EMPTY"
+                readings.append(f"Slot {slot} (GPIO {info['gpio']}): {status}")
+            print("  |  ".join(readings), end="\r")
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\nLive monitor stopped.")
+
+def main():
+    setup()
+    try:
+        while True:
+            print("\n" + "=" * 45)
+            print("       IR SENSOR OBJECT DETECTION TEST")
+            print("=" * 45)
+            print("1. Test ONLY Slot 1 IR (GPIO 4)")
+            print("2. Test ONLY Slot 2 IR (GPIO 8)")
+            print("3. Test ONLY Slot 3 IR (GPIO 7)")
+            print("4. Slot 3 Diagnostic (GPIO 7 vs GPIO 8)")
+            print("5. Monitor ALL 3 Slots Live")
+            print("6. Exit")
+            choice = input("Enter choice (1-6): ").strip()
+
+            if choice == "1":
+                test_single_slot(1)
+            elif choice == "2":
+                test_single_slot(2)
+            elif choice == "3":
+                test_single_slot(3)
+            elif choice == "4":
+                test_slot3_pin_check()
+            elif choice == "5":
+                test_all_slots_live()
+            elif choice == "6":
+                break
+            else:
+                print("Invalid choice, select 1-6.")
+    finally:
+        GPIO.cleanup()
+        print("\nCleaned up.")
+
+if __name__ == "__main__":
+    main()
