@@ -2,6 +2,7 @@ import os
 import time
 import json
 import hmac
+import uuid
 import hashlib
 from datetime import datetime
 import requests
@@ -26,8 +27,9 @@ RELAY_ON = GPIO.LOW if RELAY_ACTIVE_LOW else GPIO.HIGH
 RELAY_OFF = GPIO.HIGH if RELAY_ACTIVE_LOW else GPIO.LOW
 SOLENOID_PULSE_DURATION = 1.5
 
-API_BASE_URL = "https://autoboxs.site"
+API_BASE_URL = "http://192.168.11.130:8000"
 API_AUTHENTICATE = f"{API_BASE_URL}/api/authenticate-qr"
+API_CONFIRM_ACTION = f"{API_BASE_URL}/api/confirm-action"
 API_KEY_STATUSES = f"{API_BASE_URL}/api/keys"
 API_REPORT_MISSING = f"{API_BASE_URL}/api/key-missing"
 API_OFFLINE_CACHE = f"{API_BASE_URL}/api/offline-cache"
@@ -428,6 +430,8 @@ def load_pending_logs():
 
 
 def append_pending_log(item):
+    # Unique id lets the server ignore duplicates if an upload is retried
+    item.setdefault("uid", uuid.uuid4().hex)
     logs = load_pending_logs()
     logs.append(item)
     try:
@@ -463,8 +467,12 @@ def refresh_offline_cache():
     return False
 
 
-def sync_pending_logs():
-    """Upload queued offline transactions and access logs to Laravel once online."""
+def sync_pending_logs(timeout=None, refresh_cache=True):
+    """Upload queued offline transactions and access logs to Laravel once online.
+
+    The server applies them automatically (Option B), so this must run before a new
+    QR scan is authenticated - otherwise the server would not know about offline borrows.
+    """
     pending = load_pending_logs()
     if not pending:
         return True
@@ -473,13 +481,14 @@ def sync_pending_logs():
     try:
         payload = {"logs": pending}
         headers, body_data = build_auth_headers(payload)
-        response = requests.post(API_SYNC_LOGS, data=body_data, headers=headers, timeout=REQUEST_TIMEOUT)
+        response = requests.post(API_SYNC_LOGS, data=body_data, headers=headers, timeout=timeout or REQUEST_TIMEOUT)
         data = response.json()
         if data.get("success"):
-            synced = data.get("synced_count", len(pending))
-            print(f"[SYNC SUCCESS] Successfully synced {synced} offline event(s) to Laravel!")
+            synced = data.get("applied", data.get("synced_count", len(pending)))
+            print(f"[SYNC SUCCESS] Uploaded {len(pending)} offline event(s); server applied {synced}.")
             clear_pending_logs()
-            refresh_offline_cache()
+            if refresh_cache:
+                refresh_offline_cache()
             return True
         else:
             print(f"[SYNC WARNING] Server responded but could not complete sync: {data.get('message')}")
@@ -533,34 +542,15 @@ def authenticate_qr_offline(qr_token, slot_number=None):
 
     if borrowed_key:
         slot = int(borrowed_key.get("slot_number"))
-        borrowed_key["status"] = "available"
-        borrowed_key["borrowed_by_user_id"] = None
-        save_offline_cache(cache)
-
-        append_pending_log({
-            "type": "transaction",
-            "user_id": user["id"],
-            "key_id": borrowed_key.get("id"),
-            "slot_number": slot,
-            "action": "return",
-            "notes": "Returned via Offline QR Scan",
-            "timestamp": now_str,
-        })
-        append_pending_log({
-            "type": "access_log",
-            "user_id": user["id"],
-            "qr_token": qr_token,
-            "action": "return",
-            "result": "granted",
-            "reason": f"Offline return: Key returned to Slot #{slot}",
-            "timestamp": now_str,
-        })
-
+        # Do NOT mark as returned yet - wait for the IR sensor to confirm the key was inserted.
         return {
             "success": True,
             "status": "GRANTED",
             "action": "RETURN",
             "slot_number": slot,
+            "key_id": borrowed_key.get("id"),
+            "user_id": user["id"],
+            "qr_token": qr_token,
             "key_name": borrowed_key.get("key_name", f"Slot #{slot}"),
             "user_name": user.get("name", "User"),
             "message": f"Access Granted: Return Key to Slot #{slot}",
@@ -654,34 +644,15 @@ def authenticate_qr_offline(qr_token, slot_number=None):
         }
 
     slot = int(target_key.get("slot_number"))
-    target_key["status"] = "borrowed"
-    target_key["borrowed_by_user_id"] = user["id"]
-    save_offline_cache(cache)
-
-    append_pending_log({
-        "type": "transaction",
-        "user_id": user["id"],
-        "key_id": target_key.get("id"),
-        "slot_number": slot,
-        "action": "borrow",
-        "notes": "Borrowed via Offline QR Scan",
-        "timestamp": now_str,
-    })
-    append_pending_log({
-        "type": "access_log",
-        "user_id": user["id"],
-        "qr_token": qr_token,
-        "action": "borrow",
-        "result": "granted",
-        "reason": f"Offline borrow: Key Slot #{slot} unlocked",
-        "timestamp": now_str,
-    })
-
+    # Do NOT mark as borrowed yet - wait for the IR sensor to confirm the key was taken.
     return {
         "success": True,
         "status": "GRANTED",
         "action": "BORROW",
         "slot_number": slot,
+        "key_id": target_key.get("id"),
+        "user_id": user["id"],
+        "qr_token": qr_token,
         "key_name": target_key.get("key_name", f"Slot #{slot}"),
         "user_name": user.get("name", "User"),
         "message": f"Access Granted: Unlock Slot #{slot}",
@@ -689,15 +660,116 @@ def authenticate_qr_offline(qr_token, slot_number=None):
     }
 
 
+def commit_offline_action(result, detected):
+    """Save an offline borrow/return to the local cache + sync queue ONLY after the IR sensor result is known."""
+    action = result.get("action")
+    slot = result.get("slot_number")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tx_action = "return" if action == "RETURN" else "borrow"
+
+    if not detected:
+        reason = (f"Return NOT completed: IR sensor did not detect the key in Slot #{slot}"
+                  if action == "RETURN" else f"Borrow cancelled: key was not removed from Slot #{slot}")
+        append_pending_log({
+            "type": "access_log",
+            "user_id": result.get("user_id"),
+            "qr_token": result.get("qr_token", "OFFLINE_SCAN"),
+            "action": tx_action,
+            "result": "denied",
+            "reason": reason,
+            "slot_number": slot,
+            "timestamp": now_str,
+        })
+        return
+
+    cache = load_offline_cache()
+    keys = cache.get("keys", {})
+    cached_key = keys.get(str(slot)) or keys.get(slot)
+    if cached_key is not None:
+        if action == "RETURN":
+            cached_key["status"] = "available"
+            cached_key["borrowed_by_user_id"] = None
+        else:
+            cached_key["status"] = "borrowed"
+            cached_key["borrowed_by_user_id"] = result.get("user_id")
+        save_offline_cache(cache)
+
+    append_pending_log({
+        "type": "transaction",
+        "user_id": result.get("user_id"),
+        "key_id": result.get("key_id"),
+        "slot_number": slot,
+        "action": tx_action,
+        "notes": ("Returned via Offline QR Scan (IR confirmed)" if action == "RETURN"
+                  else "Borrowed via Offline QR Scan (IR confirmed)"),
+        "timestamp": now_str,
+    })
+    append_pending_log({
+        "type": "access_log",
+        "user_id": result.get("user_id"),
+        "qr_token": result.get("qr_token", "OFFLINE_SCAN"),
+        "action": tx_action,
+        "result": "granted",
+        "reason": (f"Key returned to Slot #{slot} (IR confirmed)" if action == "RETURN"
+                   else f"Key taken from Slot #{slot} (IR confirmed)"),
+        "slot_number": slot,
+        "timestamp": now_str,
+    })
+
+
+def finalize_action(result, detected):
+    """
+    Report the IR sensor result for a QR-authorized borrow/return.
+    The key status only changes when detected=True (key physically taken / inserted).
+    """
+    if result.get("offline"):
+        commit_offline_action(result, detected)
+        return
+
+    token = result.get("pending_token")
+    if not token:
+        return  # older server build: it already committed at scan time
+
+    payload = {
+        "pending_token": token,
+        "detected": bool(detected),
+        "detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        headers, body_data = build_auth_headers(payload)
+        response = requests.post(API_CONFIRM_ACTION, data=body_data, headers=headers, timeout=REQUEST_TIMEOUT)
+        if response.status_code < 500:
+            # 2xx = recorded, 410 = already confirmed/expired, other 4xx = rejected -> nothing to queue
+            try:
+                print(f"[CONFIRM] {response.json().get('message')}")
+            except ValueError:
+                print(f"[CONFIRM] HTTP {response.status_code}")
+            return
+        print(f"[CONFIRM] Server error HTTP {response.status_code}. Saving to offline queue...")
+    except Exception as e:
+        print(f"[CONFIRM] Server unreachable while confirming ({e}). Saving to offline queue...")
+
+    # Network dropped between scan and IR confirmation -> keep the result for the admin to sync later
+    commit_offline_action(result, detected)
+
+
 def authenticate_qr(qr_token, slot_number=None):
     payload = {"qr_token": qr_token}
     if slot_number is not None:
         payload["slot_number"] = slot_number
+
+    # Upload offline borrows/returns FIRST so the server knows who already holds a key.
+    # Example: borrowed offline at 8:00, internet back at 9:00, return scan at 9:30 ->
+    # the 8:00 borrow is uploaded here, so the 9:30 scan is treated as a RETURN.
+    if load_pending_logs():
+        sync_pending_logs(timeout=3, refresh_cache=False)
+
     try:
         headers, body_data = build_auth_headers(payload)
         response = requests.post(API_AUTHENTICATE, data=body_data, headers=headers, timeout=REQUEST_TIMEOUT)
         result = response.json()
-        sync_pending_logs()
+        if isinstance(result, dict):
+            result.setdefault("qr_token", qr_token)
         return result
     except Exception as e:
         print(f"[API ERROR / OFFLINE] {e}")
@@ -820,6 +892,7 @@ def process_scan(qr_token):
             update_key_presence_and_leds()
         elif slot:
             slot_pin = SLOT_PINS.get(slot)
+            ir_detected = False  # set True only when the IR sensor confirms the key was taken / inserted
             try:
                 # 1. Unlock main lock and run DC motor to open the slider door first
                 if ENABLE_SOLENOIDS:
@@ -869,11 +942,12 @@ def process_scan(qr_token):
                         print(f"[AUTOBOX] Slot #{slot} solenoid pushed (RELAY_OFF).")
 
                     if returned:
+                        ir_detected = True
                         lcd_print("Key Inserted!", f"Slot #{slot} Locked")
                         time.sleep(0.8)
                     else:
-                        lcd_print("Return Timeout", f"Slot #{slot} Relocked")
-                        time.sleep(0.8)
+                        lcd_print("Key Not Detected", "Still Borrowed")
+                        time.sleep(1.5)
 
                 elif action == "BORROW":
                     # 2. After DC motor stops running / door is open, pull the slot solenoid so user can get the key
@@ -909,6 +983,7 @@ def process_scan(qr_token):
                         print(f"[AUTOBOX] Slot #{slot} solenoid pushed (RELAY_OFF).")
 
                     if taken:
+                        ir_detected = True
                         lcd_print("Slot Relocked", "Please clear hand")
                         time.sleep(0.8)
                     else:
@@ -927,14 +1002,25 @@ def process_scan(qr_token):
                     if slot_pin:
                         GPIO.output(slot_pin, RELAY_OFF)
 
-            action_status = "available" if action == "RETURN" else "borrowed"
+            # Tell the server what the IR sensor saw. The key status changes ONLY if the
+            # key was physically taken (borrow) or physically inserted (return).
+            if not ENABLE_IR_SENSORS:
+                ir_detected = True  # no sensors installed/enabled -> trust the QR scan (legacy behaviour)
+            if action in ("BORROW", "RETURN"):
+                finalize_action(result, ir_detected)
+
+            if action == "RETURN":
+                action_status = "available" if ir_detected else "borrowed"
+            else:
+                action_status = "borrowed" if ir_detected else "available"
+
             if slot in known_key_statuses:
                 known_key_statuses[slot]["status"] = action_status
             else:
                 known_key_statuses[slot] = {"status": action_status, "slot_number": slot}
 
             previous_db_status[slot] = action_status
-            if action == "BORROW":
+            if action == "BORROW" and ir_detected:
                 slot_armed[slot] = False
             reported_missing_slots.discard(slot)
             slot_empty_counter[slot] = 0
